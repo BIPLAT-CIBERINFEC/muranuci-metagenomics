@@ -1,0 +1,362 @@
+---
+title: "MURANUCI sequencing depth"
+output: html_document
+---
+
+# Objetivo
+
+Este documento extrae automáticamente del informe de MultiQC el número de reads
+obtenidas para cada muestra, las reads conservadas tras el control de calidad y
+una estimación de las reads no humanas. Los cálculos se realizan en millones de
+pares de reads porque la secuenciación es paired-end.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(rvest)
+library(ggplot2)
+```
+
+# Funciones auxiliares
+
+```{r helper-functions}
+# Extrae, para cada fila de General Statistics, el atributo numérico `val` de
+# una columna concreta. Usamos val porque contiene el valor preciso, el número
+# visible del MultiQC está redondeado.
+extract_general_stat <- function(rows, css_class) {
+  map_dbl(rows, function(row) {
+    cell <- html_element(row, paste0("td.", css_class))
+    if (inherits(cell, "xml_missing")) return(NA_real_)
+    as.numeric(html_attr(cell, "val"))
+  })
+}
+
+# Separa el nombre común de la muestra, la etapa de FastQC y el mate R1/R2.
+parse_fastqc_name <- function(sample_name) {
+  tibble(
+    multiqc_name = sample_name,
+    sample_run = str_remove(sample_name, "_(raw|processed)_[12]$"),
+    stage = str_match(sample_name, "_(raw|processed)_[12]$")[, 2],
+    mate = as.integer(str_match(sample_name, "_(raw|processed)_([12])$")[, 3])
+  )
+}
+```
+
+# Lectura de General Statistics de MultiQC
+
+```{r read-multiqc}
+
+multiqc_html <- read_html("../multiqc_report.html")
+general_stats <- html_element(multiqc_html, "#table-general_stats_table")
+
+general_rows <- html_elements(general_stats, "tbody tr")
+
+multiqc_stats <- tibble(
+  multiqc_name = html_attr(html_element(general_rows, "th"), "data-original-sn"),
+  raw_reads_million = extract_general_stat(
+    general_rows,
+    "mqc-generalstats-fastqc_falco_pre_trimming-total_sequences"
+  ),
+  processed_reads_million = extract_general_stat(
+    general_rows,
+    "mqc-generalstats-fastqc_falco_post_trimming-total_sequences"
+  ),
+  fastp_reads_after_filtering_million = extract_general_stat(
+    general_rows,
+    "mqc-generalstats-fastp-filtering_result_passed_filter_reads"
+  ),
+  fastp_reads_retained_percent = extract_general_stat(
+    general_rows,
+    "mqc-generalstats-fastp-pct_surviving"
+  ),
+  host_alignment_percent = extract_general_stat(
+    general_rows,
+    "mqc-generalstats-bowtie2-overall_alignment_rate"
+  )
+)
+```
+
+# Recuento de pares antes y después del control de calidad
+
+FastQC analiza R1 y R2 por separado. Por ello, el número de pares no se calcula
+sumando ambos archivos, sino comprobando que contienen el mismo número de reads
+y tomando su media. Esta media evita pequeñas diferencias debidas al
+procesamiento, aunque se conserva una columna de control con la diferencia entre
+R1 y R2.
+
+```{r process-fastqc}
+fastqc_counts <- multiqc_stats %>%
+  filter(str_detect(multiqc_name, "_(raw|processed)_[12]$")) %>%
+  select(multiqc_name, raw_reads_million, processed_reads_million) %>%
+  bind_cols(parse_fastqc_name(.$multiqc_name) %>% select(-multiqc_name)) %>%
+  mutate(
+    reads_million = if_else(
+      stage == "raw",
+      raw_reads_million,
+      processed_reads_million
+    )
+  ) %>%
+  select(sample_run, stage, mate, reads_million) %>%
+  filter(!is.na(reads_million)) %>%
+  pivot_wider(
+    names_from = c(stage, mate),
+    values_from = reads_million,
+    names_glue = "{stage}_R{mate}_million"
+  ) %>%
+  mutate(
+    raw_read_pairs_million = rowMeans(
+      cbind(raw_R1_million, raw_R2_million),
+      na.rm = TRUE
+    ),
+    qc_read_pairs_million = rowMeans(
+      cbind(processed_R1_million, processed_R2_million),
+      na.rm = TRUE
+    ),
+    raw_R1_R2_difference = abs(raw_R1_million - raw_R2_million),
+    qc_R1_R2_difference = abs(processed_R1_million - processed_R2_million)
+  )
+
+if (any(fastqc_counts$raw_R1_R2_difference > 0.001, na.rm = TRUE)) {
+  warning("Alguna muestra presenta una diferencia entre los recuentos de R1 y R2.")
+}
+```
+
+# Integración de fastp y eliminación de reads humanas
+
+fastp comunica el total de reads individuales de ambos mates. Se divide entre
+dos para expresarlo como pares. MultiQC proporciona el porcentaje de alineamiento
+de Bowtie2 contra el genoma hospedador; se utiliza para estimar los equivalentes
+de pares no humanos que quedan disponibles para el perfil taxonómico.
+
+```{r combine-processing-stages}
+processing_counts <- multiqc_stats %>%
+  filter(
+    !is.na(fastp_reads_after_filtering_million) |
+      !is.na(host_alignment_percent)
+  ) %>%
+  transmute(
+    sample_run = multiqc_name,
+    fastp_reads_after_filtering_million,
+    fastp_read_pairs_after_filtering_million =
+      fastp_reads_after_filtering_million / 2,
+    fastp_reads_retained_percent,
+    host_alignment_percent,
+    nonhost_percent = 100 - host_alignment_percent,
+    estimated_nonhost_read_pairs_million =
+      fastp_read_pairs_after_filtering_million * nonhost_percent / 100
+  )
+
+sequencing_depth_all <- fastqc_counts %>%
+  full_join(processing_counts, by = "sample_run") %>%
+  mutate(
+    sample_id = str_remove(sample_run, "_run[0-9]+$"),
+    sample_type = if_else(
+      sample_id %in% c(
+        "Community-2", "COMUNITY-1", "CONTROL-DNA-2",
+        "DNA-CONTROL-1", "Gut-1", "Gut-microbiome-2"
+      ),
+      "Control",
+      "Clinical sample"
+    ),
+    qc_retained_percent = 100 * qc_read_pairs_million / raw_read_pairs_million
+  ) %>%
+  arrange(sample_type, sample_id)
+```
+
+# Correspondencia con los identificadores del artículo
+
+```{r clinical-sample-names}
+private_map_root <- normalizePath(getwd(), mustWork = TRUE)
+repeat {
+  private_map_file <- file.path(private_map_root, "metadata", "MURANUCI_sample_id_map.csv")
+  if (file.exists(private_map_file)) break
+  parent_dir <- dirname(private_map_root)
+  if (identical(parent_dir, private_map_root)) {
+    stop("Required private sample mapping not found: metadata/MURANUCI_sample_id_map.csv")
+  }
+  private_map_root <- parent_dir
+}
+
+sample_key <- read_csv(private_map_file, show_col_types = FALSE) %>%
+  transmute(
+    sample_id = source_sample_id,
+    patient_id,
+    visit = paste0("W", follow_up_week)
+  )
+
+stopifnot(
+  !anyDuplicated(sample_key$sample_id),
+  !anyDuplicated(sample_key[c("patient_id", "visit")])
+)
+
+sequencing_depth_clinical <- sequencing_depth_all %>%
+  filter(sample_type == "Clinical sample") %>%
+  left_join(sample_key, by = "sample_id") %>%
+  mutate(
+    patient_id = factor(patient_id, levels = paste0("PAC", 1:8)),
+    visit = factor(visit, levels = c("W0", "W1", "W2")),
+    sample_label = paste(patient_id, visit)
+  ) %>%
+  arrange(patient_id, visit)
+
+if (any(is.na(sequencing_depth_clinical$patient_id))) {
+  warning("Hay muestras clínicas sin correspondencia con un identificador PAC/visita.")
+}
+```
+
+# Tablas de salida
+
+```{r save-tables}
+write.csv(sequencing_depth_all, "./PLOTS_TAX_SEQUENCING_DEPTH/sequencing_read_counts_all_samples.csv", row.names = FALSE, na = "")
+write.csv(sequencing_depth_clinical, "./PLOTS_TAX_SEQUENCING_DEPTH/sequencing_read_counts_clinical_samples.csv", row.names = FALSE, na = "")
+
+sequencing_depth_clinical %>%
+  select(
+    patient_id,
+    visit,
+    sample_id,
+    raw_read_pairs_million,
+    qc_read_pairs_million,
+    host_alignment_percent,
+    estimated_nonhost_read_pairs_million
+  )
+```
+
+# Gráfico de profundidad de secuenciación
+
+```{r sequencing-depth-plot, fig.width=6, fig.height=7}
+plot_data <- sequencing_depth_clinical %>%
+  select(
+    sample_label,
+    `Raw read pairs` = raw_read_pairs_million,
+    `After quality filtering` = qc_read_pairs_million,
+    `Estimated non-host read-pair equivalents` =
+      estimated_nonhost_read_pairs_million
+  ) %>%
+  pivot_longer(
+    -sample_label,
+    names_to = "processing_stage",
+    values_to = "read_pairs_million"
+  ) %>%
+  left_join(
+    sequencing_depth_clinical %>%
+      transmute(
+        sample_label,
+        qc_retained_percent,
+        nonhost_percent
+      ),
+    by = "sample_label"
+  ) %>%
+  mutate(
+    sample_label = factor(
+      sample_label,
+      levels = rev(sequencing_depth_clinical$sample_label)
+    ),
+    processing_stage = factor(
+      processing_stage,
+      levels = c(
+        "Estimated non-host read-pair equivalents",
+        "After quality filtering",
+        "Raw read pairs"
+      )
+    ),
+    count_label = sprintf("%.2f M", read_pairs_million),
+    percentage_label = case_when(
+      processing_stage == "After quality filtering" ~
+        sprintf("%.1f%% of raw", qc_retained_percent),
+      processing_stage == "Estimated non-host read-pair equivalents" ~
+        sprintf("%.2f%% of filtered", nonhost_percent),
+      TRUE ~ ""
+    ),
+    bar_label = if_else(
+      percentage_label == "",
+      count_label,
+      paste0(count_label, " (", percentage_label, ")")
+    )
+  )
+
+sequencing_depth_plot <- ggplot(
+  plot_data,
+  aes(x = sample_label, y = read_pairs_million, fill = processing_stage)
+) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.72) +
+  geom_text(
+    aes(
+      y = read_pairs_million + 1.2,
+      label = bar_label,
+      group = processing_stage
+    ),
+    position = position_dodge(width = 0.8),
+    hjust = 0,
+    size = 3.0
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Raw read pairs" = "#0072B2",
+      "After quality filtering" = "#E69F00",
+      "Estimated non-host read-pair equivalents" = "#009E73"
+    )
+  ) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  labs(
+    title = "Sequencing depth by sample",
+    x = "Patient and visit",
+    y = "Read pairs (millions)",
+    fill = "Processing stage"
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.42))
+  ) +
+  coord_flip() +
+  theme_classic(base_size = 13) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    axis.text.y = element_text(size = 11),
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    legend.key.width = grid::unit(0.45, "cm"),
+    legend.key.height = grid::unit(0.35, "cm"),
+    legend.spacing.x = grid::unit(0.12, "cm")
+  )
+
+sequencing_depth_plot
+
+ggsave(
+  "./PLOTS_TAX_SEQUENCING_DEPTH/sequencing_depth_clinical_samples.png",
+  sequencing_depth_plot,
+  width = 7,
+  height = 7,
+  dpi = 300
+)
+```
+
+# Resumen para resultados
+
+```{r summary-statistics}
+sequencing_depth_summary <- sequencing_depth_clinical %>%
+  summarise(
+    samples = n(),
+    median_raw_read_pairs_million = median(raw_read_pairs_million, na.rm = TRUE),
+    min_raw_read_pairs_million = min(raw_read_pairs_million, na.rm = TRUE),
+    max_raw_read_pairs_million = max(raw_read_pairs_million, na.rm = TRUE),
+    median_nonhost_read_pairs_million = median(
+      estimated_nonhost_read_pairs_million,
+      na.rm = TRUE
+    ),
+    min_nonhost_read_pairs_million = min(
+      estimated_nonhost_read_pairs_million,
+      na.rm = TRUE
+    ),
+    max_nonhost_read_pairs_million = max(
+      estimated_nonhost_read_pairs_million,
+      na.rm = TRUE
+    )
+  )
+
+sequencing_depth_summary
+```

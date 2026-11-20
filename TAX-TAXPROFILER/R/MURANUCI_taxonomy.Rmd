@@ -1,0 +1,1407 @@
+---
+title: "MURANUCI"
+output:
+  html_document:
+      toc: true
+      toc_float: true
+      toc_depth: 3
+      number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+```{r LOAD LIBRARIES, include=FALSE}
+#Cargamos las librerías necesarias para el análisis.
+#library(dplyr)
+library(tidyverse)
+library(ggsci)
+library(scales)
+library(cowplot)
+library(RColorBrewer)
+library(viridis)
+library(ggrepel)
+
+getwd()
+
+private_map_root <- normalizePath(getwd(), mustWork = TRUE)
+repeat {
+  private_map_file <- file.path(private_map_root, "metadata", "MURANUCI_sample_id_map.csv")
+  if (file.exists(private_map_file)) break
+  parent_dir <- dirname(private_map_root)
+  if (identical(parent_dir, private_map_root)) {
+    stop("Required private sample mapping not found: metadata/MURANUCI_sample_id_map.csv")
+  }
+  private_map_root <- parent_dir
+}
+
+private_sample_map <- read_csv(private_map_file, show_col_types = FALSE)
+
+source("./import_kraken.R")
+source("./functions_taxonomy_plots.R")
+```
+
+# TAXONOMY ANNOTATION: TAXPROFILER
+
+En la siguiente tabla se muestra el informe de salida generado por Kraken2, que incluye las siguientes columnas:
+
+1. Prop: Percentage of reads covered by the clade rooted at this taxon
+2. Reads: Number of reads covered by the clade rooted at this taxon
+3. Assigned: Number of reads assigned directly to this taxon
+4. TaxRank: A rank code, indicating (U)nclassified, (D)omain, (K)ingdom, (P)hylum, (C)lass, (O)rder, (F)amily, (G)enus, or (S)pecies. All other ranks are simply '-'.
+5. NCBI: NCBI taxonomy ID
+6. Name: indented scientific name
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+#Cargar en una única tabla todos los report de bracken
+    files = dir("../bracken/db2/",pattern = ".report_bracken_species.txt", full.names = T)
+    tabla_raw <- import_kraken(files,threads = 20)
+    #tabla_raw2 <- import_kraken2(files,threads = 20)
+    
+#Arreglar nombres en tabla    
+    tabla <- tabla_raw %>% 
+      mutate(Sample = gsub("_pe_run1_db2.bracken.kraken2.report_bracken_species.txt","",Sample))
+    
+
+    tabla <- tabla  %>% 
+      mutate(Sample = coalesce(
+        private_sample_map$name[match(Sample, private_sample_map$source_sample_id)],
+        Sample
+      )) %>%
+      separate(Sample, c("Patient","Week"), sep="-0", remove=F) %>% 
+      mutate(Week = str_replace(Week, "-M","")) %>%
+      mutate(Week = as.integer(Week) -1) %>%
+      mutate(Week = replace_na(Week, 0))
+
+#Quitar controles
+    controls_list <- c("Community-2", "COMUNITY-1", "CONTROL-DNA-2", "DNA-CONTROL-1", "Gut-1", "Gut-microbiome-2")
+    tabla <- tabla %>% filter(!Sample %in% controls_list) 
+    
+
+abundance_matrix <- tabla %>% 
+  dplyr::select(NCBI,Reads,Sample) %>% 
+  distinct() %>% 
+  pivot_wider(names_from = Sample, values_from = Reads, values_fill = 0) %>%
+  column_to_rownames("NCBI")
+
+DT::datatable(tabla[1:6])
+```
+
+# Cambiar asignación IDs de muestras
+```{r}
+# Tabla de correspondencia para IDs del paper
+
+# Private correspondence file is stored outside the public results directory.
+
+sample_id_newnames <- private_sample_map %>%
+  transmute(
+    Patient_old = sample,
+    Week = as.integer(follow_up_week),
+    patient_id,
+    follow_up_week = paste0("W", follow_up_week)
+  )
+
+stopifnot(
+  !anyDuplicated(sample_id_newnames[c("Patient_old", "Week")]),
+  all(sample_id_newnames$Week %in% 0:2)
+)
+
+tabla <- tabla %>%
+  rename(
+    Patient_old = Patient
+  ) %>%
+  left_join(
+    sample_id_newnames,
+    by = c("Patient_old", "Week")
+  ) %>%
+  mutate(
+    Patient = patient_id,
+      Patient = factor(Patient, levels = paste0("PAC", 1:8)),
+    follow_up_week = factor(follow_up_week, levels = c("W0", "W1", "W2")),
+    sample_plot_label = paste0(patient_id, " ", follow_up_week),
+    sample_plot_label_2lines = paste0(patient_id, "\n", follow_up_week)
+  )
+
+```
+
+## DOMAIN
+**Proporción de OTUs nivel de Dominio y No clasificadas:**
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=6, fig.height=3}
+#unclassified and kingdom
+taxrank_domain <- tabla %>% 
+  filter(TaxRank %in% c("U", "D")) %>% 
+  rename(Domain = Name2) %>% 
+  ggplot(aes(x = sample_plot_label_2lines, y = Reads, fill = Domain)) + 
+  geom_col(position = "fill", color = "black", width = 0.8) +  # Black borders and thinner bars
+  scale_fill_d3(palette = "category20") +
+  #scale_fill_viridis_d(option = "plasma") +  # Improved color palette
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample at Domain level",
+    subtitle = "Proportion of normalized reads",
+    x = "Sample",
+    y = "Relative abundance (%)",
+    fill = "Domain"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(size = 12),  # Rotates labels if there are many samples
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  )
+taxrank_domain
+
+#ggsave(filename = "Taxonomic_Profile_D.svg", plot = taxrank_domain, device = "svg", path = "./PLOTS_TAX_AUTOGENERATED/", width = 14, height = 9, dpi = 300)
+
+ggsave(filename = "Taxonomic_Profile_D.png", plot = taxrank_domain, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 14, height = 9, dpi = 300)
+```
+El gráfico muestra, para cada muestra, la abundancia relativa de lecturas normalizadas a nivel de dominio mediante barras apiladas al 100%, incluyendo la fracción no clasificada. Esto permite comparar entre muestras la proporción de cada dominio y el porcentaje de lecturas sin asignación taxonómica.
+
+Los análisis y visualizaciones posteriores incluyen únicamente las entidades clasificadas dentro del **dominio Bacteria**.
+
+## FAMILY
+
+### UMBRAL
+```{r, warning=FALSE, message=FALSE, echo=FALSE, fig.width=4, fig.height=3}
+rank_abundance_F <- plot_rank_abundance_thresholds(
+  tabla = tabla,
+  rank_code = "F",
+  taxon_label = "Family",
+  thresholds = c(0.10, 0.005)
+)
+
+rank_abundance_F
+
+ggsave(
+  filename = "rank_abundance_F.png",
+  plot = rank_abundance_F,
+  device = "png",
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+```
+
+### Usando Reads (top15 globales)
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_family_top15_global <- plot_top15_global(
+  tabla = tabla,
+  rank_code = "F",
+  taxon_label = "Family",
+  taxon_label_plural = "families"
+)
+
+taxrank_family_top15_global
+
+ggsave(
+  filename = "Taxonomic_Profile_F_top15_global.png",
+  plot = taxrank_family_top15_global,
+  device = "png",
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 7,
+  height = 7,
+  dpi = 300
+)
+```
+
+### Usando Reads (>10% abundancia global)
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_family_reads10 <- plot_global_threshold(
+  tabla = tabla,
+  rank_code = "F",
+  taxon_label = "Family",
+  taxon_label_plural = "Families",
+  threshold = 0.10
+)
+
+taxrank_family_reads10
+
+ggsave(
+  filename = "Taxonomic_Profile_F_10percAbun_global.png",
+  plot = taxrank_family_reads10,
+  device = "png",
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 14,
+  height = 15,
+  dpi = 300
+)
+```
+
+### Usando Reads (>0,5% abundancia global)
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_family_reads05 <- plot_global_threshold(
+  tabla = tabla,
+  rank_code = "F",
+  taxon_label = "Family",
+  taxon_label_plural = "Families",
+  threshold = 0.005
+)
+
+taxrank_family_reads05
+
+ggsave(
+  filename = "Taxonomic_Profile_F_0.5percAbun_global.png",
+  plot = taxrank_family_reads05,
+  device = "png",
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 14,
+  height = 15,
+  dpi = 300
+)
+```
+
+## CLASS
+**Representación de las 15 clases más abundantes a nivel global:**
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_class_top15_global <- plot_top15_global(
+  tabla = tabla,
+  rank_code = "C",
+  taxon_label = "Class",
+  taxon_label_plural = "classes"
+)
+
+taxrank_class_top15_global
+
+ggsave(
+  filename = "Taxonomic_Profile_C_top15_global.png",
+  plot = taxrank_class_top15_global,
+  device = "png",
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 7,
+  height = 7,
+  dpi = 300
+)
+```
+
+## GENUS
+**Representación de los 15 géneros más abundantes a nivel global:**
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_genus_top15_global <- plot_top15_global(
+  tabla = tabla,
+  rank_code = "G",
+  taxon_label = "Genus",
+  taxon_label_plural = "genera"
+)
+
+taxrank_genus_top15_global
+
+ggsave(
+  filename = "Taxonomic_Profile_G_top15_global.png",
+  plot = taxrank_genus_top15_global,
+  device = "png",
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 7,
+  height = 7,
+  dpi = 300
+)
+```
+
+## SPECIES
+**Representación de las 15 especies más abundantes a nivel global:**
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_species_top15_global <- plot_top15_global(
+  tabla = tabla,
+  rank_code = "S",
+  taxon_label = "Species",
+  taxon_label_plural = "species"
+)
+
+taxrank_species_top15_global
+
+ggsave(
+  filename = "Taxonomic_Profile_S_top15_global.png",
+  plot = taxrank_species_top15_global,
+  device = "png",
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 7,
+  height = 7,
+  dpi = 300
+)
+```
+
+## PATHOGENS OF INTEREST
+**Representación de los patógenos de interés :**
+```{r}
+scale_reads_millions <- scale_y_continuous(
+  labels = scales::label_number(
+    scale = 1e-6,
+    suffix = "M",
+    accuracy = 0.1,
+    decimal.mark = ","
+  )
+)
+```
+
+### Reads + No Free Y
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+# 0) Mapping 1:1 de Sample -> Patient/Week (si no es 1:1, lo verás aquí)
+mapping <- tabla %>%
+  select(Sample, Patient, follow_up_week) %>%
+  distinct()
+
+# (Opcional) check rápido: si devuelve filas, tienes samples con >1 Patient/Week
+# mapping %>% count(Sample) %>% filter(n > 1)
+
+taxrank_pathogens <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(
+    (TaxRank == "S"  & Name2 == "Acinetobacter baumannii") |
+    (TaxRank == "S"  & Name2 == "Escherichia coli") |
+    (TaxRank == "G"  & Name2 == "Citrobacter") |
+    (TaxRank == "S"  & Name2 == "Klebsiella pneumoniae") |
+    (TaxRank == "G"  & Name2 == "Proteus") |
+    (TaxRank == "S"  & Name2 == "Pseudomonas aeruginosa") |
+    (TaxRank == "G1" & Name2 == "Enterobacter cloacae complex") |
+    (TaxRank == "G"  & Name2 == "Serratia") |
+    (TaxRank == "G"  & Name2 == "Salmonella") |
+    (TaxRank == "G"  & Name2 == "Shigella") |
+    (TaxRank == "G"  & Name2 == "Staphylococcus") |
+    (TaxRank == "G"  & Name2 == "Enterococcus") |
+    (TaxRank == "G"  & Name2 == "Streptococcus") |
+    (TaxRank == "G"  & Name2 == "Burkholderia") |
+    (TaxRank == "G"  & Name2 == "Stenotrophomonas")
+  ) %>%
+  mutate(Pathogens = case_when(
+    Name2 %in% c("Burkholderia", "Stenotrophomonas") ~ "Other NFGNB",
+    Name2 %in% c("Staphylococcus", "Enterococcus", "Streptococcus") ~ "Gram-positive bacteria",
+    Name2 %in% c("Serratia", "Salmonella", "Shigella") ~ "Other Enterobacterales",
+    TRUE ~ Name2
+  )) %>%
+  group_by(Sample, Patient, follow_up_week, Pathogens) %>%
+  summarise(Sum = sum(Reads, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    Sample = factor(Sample, levels = sort(unique(Sample))),
+    Pathogens = factor(
+      Pathogens,
+      levels = c(
+        sort(setdiff(unique(Pathogens), c("Other NFGNB", "Gram-positive bacteria", "Other Enterobacterales"))),
+        "Other NFGNB", "Gram-positive bacteria", "Other Enterobacterales"
+      )
+    )
+  ) %>%
+  ggplot(aes(x = follow_up_week, y = Sum, fill = Pathogens)) +
+  geom_col(color = "black", width = 0.8) +
+  scale_fill_d3(palette = "category20", labels = taxon_plotmath_labels) +
+  scale_reads_millions +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Clinically relevant bacterial taxa",
+    x = "Follow-up week",
+    y = "Bracken-estimated reads (millions)",
+    fill = "Pathogen"
+  ) +
+  guides(fill = guide_legend(ncol = 3, byrow = TRUE)) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  ) +
+  facet_wrap(~ Patient)
+
+taxrank_pathogens
+
+ggsave(filename = "Taxonomic_Profile_Pathogens_readsAbundance_sameYaxis.png", plot = taxrank_pathogens, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 12, height = 12, dpi = 300, bg = "white")
+```
+
+### Reads + Free Y
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_pathogens_freey <- tabla %>%
+  filter(grepl("Bacteria",Fullname)) %>%
+    filter(
+      (TaxRank == "S" & Name2 == "Acinetobacter baumannii") |
+      (TaxRank == "S" & Name2 == "Escherichia coli") |
+      (TaxRank == "G" & Name2 == "Citrobacter") |
+      (TaxRank == "S" & Name2 == "Klebsiella pneumoniae") |
+      (TaxRank == "G" & Name2 == "Proteus") |
+      (TaxRank == "S" & Name2 == "Pseudomonas aeruginosa") |
+      (TaxRank == "G1" & Name2 == "Enterobacter cloacae complex") |
+      (TaxRank == "G" & Name2 == "Serratia") |
+      (TaxRank == "G" & Name2 == "Salmonella") |
+      (TaxRank == "G" & Name2 == "Shigella") |
+      (TaxRank == "G" & Name2 == "Staphylococcus") |
+      (TaxRank == "G" & Name2 == "Enterococcus") |
+      (TaxRank == "G" & Name2 == "Streptococcus") |
+      (TaxRank == "G" & Name2 == "Burkholderia") |
+      (TaxRank == "G" & Name2 == "Stenotrophomonas")
+      ) %>%
+  mutate(Name2 = case_when(
+    Name2 %in% c("Burkholderia", "Stenotrophomonas") ~ "Other NFGNB",
+    Name2 %in% c("Staphylococcus", "Enterococcus", "Streptococcus") ~ "Gram-positive bacteria",
+    Name2 %in% c("Serratia", "Salmonella", "Shigella") ~ "Other Enterobacterales",
+    TRUE ~ Name2
+  )) %>%
+  dplyr::rename(Pathogens = Name2) %>%
+  group_by(Sample, Pathogens) %>%  # Agrupa nuevamente después de asignar "Other..."
+  summarise(Sum = sum(Reads, na.rm = TRUE), .groups = "drop") %>%  # Sumar valores dentro de cada grupo
+  dplyr::left_join(tabla %>% select(Sample,Patient,follow_up_week) %>% unique()) %>%
+  mutate(Sample = factor(Sample, levels = sort(unique(Sample)))) %>%  # Ordenar alfabéticamente
+  mutate(Pathogens = factor(Pathogens, levels = c(
+    sort(setdiff(unique(Pathogens), c("Other NFGNB", "Gram-positive bacteria", "Other Enterobacterales"))),
+    "Other NFGNB", "Gram-positive bacteria", "Other Enterobacterales")
+    )) %>% 
+  ggplot(aes(x=factor(follow_up_week),y=Sum, fill=Pathogens)) +
+  geom_col(color = "black", width = 0.8) +  # Black borders and thinner bars
+  scale_fill_d3(palette = "category20", labels = taxon_plotmath_labels) +
+  scale_reads_millions +
+  #scale_fill_viridis_d(option = "plasma") +  # Improved color palette
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Clinically relevant bacterial taxa",
+    x = "Follow-up week",
+    y = "Bracken-estimated reads (millions)",
+    fill = "Pathogen"
+  ) +
+  guides(fill = guide_legend(ncol = 3, byrow = TRUE)) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),  # Rotates labels if there are many samples
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  )  +
+  facet_wrap(~ Patient, scales = "free_y")  # Divide por muestra
+taxrank_pathogens_freey
+
+
+#ggsave(filename = "Taxonomic_Profile_Pathogens_readsAbundance_freeYaxis.svg", plot = taxrank_pathogens_freey, device = "svg", path = "./PLOTS_TAX_AUTOGENERATED/", width = 7, height = 7, dpi = 300)
+
+ggsave(filename = "Taxonomic_Profile_Pathogens_readsAbundance_freeYaxis.png", plot = taxrank_pathogens_freey, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 12, height = 12, dpi = 300, bg = "white")
+```
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=10, fig.height=10}
+taxrank_pathogens_df <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(
+    (TaxRank == "S" & Name2 == "Acinetobacter baumannii") |
+    (TaxRank == "S" & Name2 == "Escherichia coli") |
+    (TaxRank == "G" & Name2 == "Citrobacter") |
+    (TaxRank == "S" & Name2 == "Klebsiella pneumoniae") |
+    (TaxRank == "G" & Name2 == "Proteus") |
+    (TaxRank == "S" & Name2 == "Pseudomonas aeruginosa") |
+    (TaxRank == "G1" & Name2 == "Enterobacter cloacae complex") |
+    (TaxRank == "G" & Name2 == "Serratia") |
+    (TaxRank == "G" & Name2 == "Salmonella") |
+    (TaxRank == "G" & Name2 == "Shigella") |
+    (TaxRank == "G" & Name2 == "Staphylococcus") |
+    (TaxRank == "G" & Name2 == "Enterococcus") |
+    (TaxRank == "G" & Name2 == "Streptococcus") |
+    (TaxRank == "G" & Name2 == "Burkholderia") |
+    (TaxRank == "G" & Name2 == "Stenotrophomonas")
+  ) %>%
+  mutate(
+    Group = case_when(
+      Name2 %in% c("Burkholderia", "Stenotrophomonas") ~ "Other NFGNB",
+      Name2 %in% c("Staphylococcus", "Enterococcus", "Streptococcus") ~ "Gram-positive bacteria",
+      Name2 %in% c("Serratia", "Salmonella", "Shigella") ~ "Other Enterobacterales",
+      TRUE ~ Name2
+    ),
+    Taxa = Name2
+  ) %>%
+  group_by(Sample, Patient, follow_up_week, Group, Taxa) %>%
+  summarise(Sum = sum(Reads, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    Sample = factor(Sample, levels = sort(unique(Sample)))
+  )
+
+# Orden de grupos en la leyenda y en el stack
+group_levels <- c(
+  "Acinetobacter baumannii",
+  "Citrobacter",
+  "Escherichia coli",
+  "Klebsiella pneumoniae",
+  "Proteus",
+  "Pseudomonas aeruginosa",
+  "Enterobacter cloacae complex",
+  "Other NFGNB",
+  "Gram-positive bacteria",
+  "Other Enterobacterales"
+)
+
+# Orden interno de taxones dentro de cada grupo agrupado
+taxa_levels <- c(
+  "Acinetobacter baumannii",
+  "Citrobacter",
+  "Escherichia coli",
+  "Klebsiella pneumoniae",
+  "Proteus",
+  "Pseudomonas aeruginosa",
+  "Enterobacter cloacae complex",
+  "Burkholderia",
+  "Stenotrophomonas",
+  "Staphylococcus",
+  "Enterococcus",
+  "Streptococcus",
+  "Serratia",
+  "Salmonella",
+  "Shigella"
+)
+
+taxrank_pathogens_df <- taxrank_pathogens_df %>%
+  mutate(
+    Group = factor(Group, levels = group_levels),
+    Taxa = factor(Taxa, levels = taxa_levels),
+    Label_taxa = case_when(
+      Group %in% c("Other NFGNB", "Gram-positive bacteria", "Other Enterobacterales") ~ as.character(Taxa),
+      TRUE ~ ""
+    )
+  ) %>%
+  arrange(Sample, follow_up_week, Group, Taxa)
+
+taxrank_pathogens <- ggplot(
+  taxrank_pathogens_df,
+  aes(
+    x = factor(follow_up_week),
+    y = Sum,
+    fill = Group,
+    order = Taxa
+  )
+) +
+  geom_col(
+    aes(group = interaction(Group, Taxa)),
+    color = "black",
+    width = 0.8
+  ) +
+  geom_text(
+    aes(
+      group = interaction(Group, Taxa),
+      label = ifelse(Sum > 0, taxon_plotmath_strings(Label_taxa), "")
+    ),
+    position = position_stack(vjust = 0.5),
+    size = 3,
+    color = "black",
+    parse = TRUE
+  ) +
+  scale_fill_d3(palette = "category20", labels = taxon_plotmath_labels) +
+  scale_reads_millions +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Clinically relevant bacterial taxa",
+    x = "Follow-up week",
+    y = "Reads",
+    fill = "Pathogen"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  ) +
+  facet_wrap(~ Patient, scales = "free_y")
+
+taxrank_pathogens
+
+```
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=12, fig.height=10}
+taxrank_pathogens_df <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(
+    (TaxRank == "S" & Name2 == "Acinetobacter baumannii") |
+    (TaxRank == "S" & Name2 == "Escherichia coli") |
+    (TaxRank == "G" & Name2 == "Citrobacter") |
+    (TaxRank == "S" & Name2 == "Klebsiella pneumoniae") |
+    (TaxRank == "G" & Name2 == "Proteus") |
+    (TaxRank == "S" & Name2 == "Pseudomonas aeruginosa") |
+    (TaxRank == "G1" & Name2 == "Enterobacter cloacae complex") |
+    (TaxRank == "G" & Name2 == "Serratia") |
+    (TaxRank == "G" & Name2 == "Salmonella") |
+    (TaxRank == "G" & Name2 == "Shigella") |
+    (TaxRank == "G" & Name2 == "Staphylococcus") |
+    (TaxRank == "G" & Name2 == "Enterococcus") |
+    (TaxRank == "G" & Name2 == "Streptococcus") |
+    (TaxRank == "G" & Name2 == "Burkholderia") |
+    (TaxRank == "G" & Name2 == "Stenotrophomonas")
+  ) %>%
+  mutate(
+    Group = case_when(
+      Name2 %in% c("Burkholderia", "Stenotrophomonas") ~ "Other NFGNB",
+      Name2 %in% c("Staphylococcus", "Enterococcus", "Streptococcus") ~ "Gram-positive bacteria",
+      Name2 %in% c("Serratia", "Salmonella", "Shigella") ~ "Other Enterobacterales",
+      TRUE ~ Name2
+    ),
+    Taxa = Name2
+  ) %>%
+  group_by(Sample, Patient, follow_up_week, Group, Taxa) %>%
+  summarise(Sum = sum(Reads, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    Sample = factor(Sample, levels = sort(unique(Sample)))
+  )
+
+# Orden de grupos
+group_levels <- c(
+  "Acinetobacter baumannii",
+  "Citrobacter",
+  "Escherichia coli",
+  "Klebsiella pneumoniae",
+  "Proteus",
+  "Pseudomonas aeruginosa",
+  "Enterobacter cloacae complex",
+  "Other NFGNB",
+  "Gram-positive bacteria",
+  "Other Enterobacterales"
+)
+
+# Orden interno de taxones
+taxa_levels <- c(
+  "Acinetobacter baumannii",
+  "Citrobacter",
+  "Escherichia coli",
+  "Klebsiella pneumoniae",
+  "Proteus",
+  "Pseudomonas aeruginosa",
+  "Enterobacter cloacae complex",
+  "Burkholderia",
+  "Stenotrophomonas",
+  "Staphylococcus",
+  "Enterococcus",
+  "Streptococcus",
+  "Serratia",
+  "Salmonella",
+  "Shigella"
+)
+
+taxrank_pathogens_df <- taxrank_pathogens_df %>%
+  mutate(
+    Group = factor(Group, levels = group_levels),
+    Taxa = factor(Taxa, levels = taxa_levels)
+  ) %>%
+  arrange(Patient, Sample, follow_up_week, Group, Taxa)
+
+# Calcular posición media de cada segmento para poner la etiqueta fuera
+labels_df <- taxrank_pathogens_df %>%
+  group_by(Patient, follow_up_week) %>%
+  arrange(Group, Taxa, .by_group = TRUE) %>%
+  mutate(
+    ymax = cumsum(Sum),
+    ymin = ymax - Sum,
+    ymid = (ymin + ymax) / 2
+  ) %>%
+  ungroup() %>%
+  filter(
+    Group %in% c("Other NFGNB", "Gram-positive bacteria", "Other Enterobacterales"),
+    Sum > 0
+  )
+
+taxrank_pathogens <- ggplot(
+  taxrank_pathogens_df,
+  aes(
+    x = factor(follow_up_week),
+    y = Sum,
+    fill = Group,
+    order = Taxa
+  )
+) +
+  geom_col(
+    aes(group = interaction(Group, Taxa)),
+    color = "black",
+    width = 0.8
+  ) +
+  geom_text_repel(
+    data = labels_df,
+    aes(
+      x = factor(follow_up_week),
+      y = ymid,
+      label = taxon_plotmath_strings(Taxa)
+    ),
+    inherit.aes = FALSE,
+    direction = "y",
+    nudge_x = 0.35,
+    hjust = 0,
+    size = 3,
+    segment.color = "black",
+    segment.size = 0.4,
+    box.padding = 0.2,
+    point.padding = 0.1,
+    min.segment.length = 0,
+    seed = 123,
+    max.overlaps = Inf,
+    parse = TRUE
+  ) +
+  scale_fill_d3(palette = "category20", labels = taxon_plotmath_labels) +
+  scale_reads_millions +
+  coord_cartesian(clip = "off") +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Clinically relevant bacterial taxa",
+    x = "Follow-up week",
+    y = "Reads",
+    fill = "Pathogen"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5),
+    plot.margin = margin(5.5, 70, 5.5, 5.5)   # espacio para etiquetas fuera
+  ) +
+  facet_wrap(~ Patient, scales = "free_y")
+
+taxrank_pathogens
+```
+
+
+### Klebsiella
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_pathogens <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(
+    TaxRank == "S" & grepl("^Klebsiella", Name2)
+  ) %>%
+  dplyr::rename(Pathogens = Name2) %>%
+  group_by(Sample, Pathogens) %>%
+  summarise(Sum = sum(Reads, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::left_join(
+    tabla %>% select(Sample, Patient, follow_up_week) %>% unique(),
+    by = "Sample"
+  ) %>%
+  mutate(Sample = factor(Sample, levels = sort(unique(Sample))))
+
+# Crear una paleta con tantos colores como especies haya
+n_pathogens <- length(unique(taxrank_pathogens$Pathogens))
+my_colors <- colorRampPalette(brewer.pal(12, "Set3"))(n_pathogens)
+
+taxrank_pathogens_plot <- taxrank_pathogens %>%
+  ggplot(aes(x = follow_up_week, y = Sum, fill = Pathogens)) +
+  geom_col(color = "black", width = 0.8) +
+  scale_fill_manual(values = my_colors, labels = taxon_plotmath_labels) +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Klebsiella species",
+    x = "Follow-up week",
+    y = "Reads",
+    fill = "Pathogen"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  ) +
+  facet_wrap(~ Patient, scales = "free_y")
+
+taxrank_pathogens_plot
+
+ggsave(filename = "Taxonomic_Profile_Pathogens_Klebsiella_freeY.png", plot = taxrank_pathogens_plot, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 7, height = 7, dpi = 300)
+```
+
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_pathogens <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(
+    TaxRank == "S" & grepl("^Klebsiella", Name2)
+  ) %>%
+  dplyr::rename(Pathogens = Name2) %>%
+  group_by(Sample, Pathogens) %>%
+  summarise(Sum = sum(Reads, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::left_join(
+    tabla %>% select(Sample, Patient, follow_up_week) %>% unique(),
+    by = "Sample"
+  ) %>%
+  mutate(Sample = factor(Sample, levels = sort(unique(Sample))))
+
+# Crear una paleta con tantos colores como especies haya
+n_pathogens <- length(unique(taxrank_pathogens$Pathogens))
+my_colors <- colorRampPalette(brewer.pal(12, "Set3"))(n_pathogens)
+
+taxrank_pathogens_plot <- taxrank_pathogens %>%
+  ggplot(aes(x = follow_up_week, y = Sum, fill = Pathogens)) +
+  geom_col(color = "black", width = 0.8) +
+  scale_fill_manual(values = my_colors, labels = taxon_plotmath_labels) +
+  scale_reads_millions +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Klebsiella species",
+    x = "Follow-up week",
+    y = "Reads",
+    fill = "Pathogen"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  ) +
+  facet_wrap(~ Patient)
+
+taxrank_pathogens_plot
+
+ggsave(filename = "Taxonomic_Profile_Pathogens_Klebsiella.png", plot = taxrank_pathogens_plot, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 7, height = 7, dpi = 300)
+```
+
+
+### GRUPOS
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+taxrank_pathogens_df <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(
+    (TaxRank == "S" & Name2 == "Acinetobacter baumannii") |
+    (TaxRank == "S" & Name2 == "Escherichia coli") |
+    (TaxRank == "G" & Name2 == "Citrobacter") |
+    (TaxRank == "S" & Name2 == "Klebsiella pneumoniae") |
+    (TaxRank == "G" & Name2 == "Proteus") |
+    (TaxRank == "S" & Name2 == "Pseudomonas aeruginosa") |
+    (TaxRank == "G1" & Name2 == "Enterobacter cloacae complex") |
+    (TaxRank == "G" & Name2 == "Serratia") |
+    (TaxRank == "G" & Name2 == "Salmonella") |
+    (TaxRank == "G" & Name2 == "Shigella") |
+    (TaxRank == "G" & Name2 == "Staphylococcus") |
+    (TaxRank == "G" & Name2 == "Enterococcus") |
+    (TaxRank == "G" & Name2 == "Streptococcus") |
+    (TaxRank == "G" & Name2 == "Burkholderia") |
+    (TaxRank == "G" & Name2 == "Stenotrophomonas")
+  ) %>%
+  mutate(
+    Group = case_when(
+      Name2 %in% c("Burkholderia", "Stenotrophomonas") ~ "Other NFGNB",
+      Name2 %in% c("Staphylococcus", "Enterococcus", "Streptococcus") ~ "Gram-positive bacteria",
+      Name2 %in% c("Serratia", "Salmonella", "Shigella") ~ "Other Enterobacterales",
+      TRUE ~ Name2
+    ),
+    Taxa = Name2
+  ) %>%
+  group_by(Sample, Patient, follow_up_week, Group, Taxa) %>%
+  summarise(Sum = sum(Reads, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    Sample = factor(Sample, levels = sort(unique(Sample)))
+  )
+```
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+plot_other_gp <- taxrank_pathogens_df %>%
+  filter(Group == "Gram-positive bacteria") %>%
+  mutate(
+    Taxa = factor(Taxa, levels = c("Staphylococcus", "Enterococcus", "Streptococcus"))
+  ) %>%
+  ggplot(aes(x = factor(follow_up_week), y = Sum, fill = Taxa)) +
+  geom_col(color = "black", width = 0.8) +
+  scale_fill_d3(palette = "category10", labels = taxon_plotmath_labels) +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Gram-positive bacteria",
+    x = "Follow-up week",
+    y = "Reads",
+    fill = "Taxa"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  ) +
+  facet_wrap(~ Patient, scales = "free_y")
+
+plot_other_gp
+
+ggsave(filename = "Taxonomic_Profile_Pathogens_OtherGP.png", plot = plot_other_gp, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 7, height = 7, dpi = 300)
+```
+
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+plot_other_nfgnb <- taxrank_pathogens_df %>%
+  filter(Group == "Other NFGNB") %>%
+  mutate(
+    Taxa = factor(Taxa, levels = c("Burkholderia", "Stenotrophomonas"))
+  ) %>%
+  ggplot(aes(x = factor(follow_up_week), y = Sum, fill = Taxa)) +
+  geom_col(color = "black", width = 0.8) +
+  scale_fill_d3(palette = "category10", labels = taxon_plotmath_labels) +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Other NFGNB",
+    x = "Follow-up week",
+    y = "Reads",
+    fill = "Taxa"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  ) +
+  facet_wrap(~ Patient, scales = "free_y")
+
+plot_other_nfgnb
+
+ggsave(filename = "Taxonomic_Profile_Pathogens_OtherNFGNB.png", plot = plot_other_nfgnb, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 7, height = 7, dpi = 300)
+
+```
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+plot_other_enterobacterales <- taxrank_pathogens_df %>%
+  filter(Group == "Other Enterobacterales") %>%
+  mutate(
+    Taxa = factor(Taxa, levels = c("Serratia", "Salmonella", "Shigella"))
+  ) %>%
+  ggplot(aes(x = factor(follow_up_week), y = Sum, fill = Taxa)) +
+  geom_col(color = "black", width = 0.8) +
+  scale_fill_d3(palette = "category10", labels = taxon_plotmath_labels) +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = "Taxonomic Composition by Sample",
+    subtitle = "Other Enterobacterales",
+    x = "Follow-up week",
+    y = "Reads",
+    fill = "Taxa"
+  ) +
+  theme(
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.text.x = element_text(hjust = 1, size = 12),
+    legend.position = "top",
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold", color = "black"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5)
+  ) +
+  facet_wrap(~ Patient, scales = "free_y")
+
+plot_other_enterobacterales
+
+ggsave(filename = "Taxonomic_Profile_Pathogens_OtherEnterobacterales.png", plot = plot_other_enterobacterales, device = "png", path = "./PLOTS_TAX_AUTOGENERATED/", width = 7, height = 7, dpi = 300)
+```
+
+#DATOS NUMÉRICOS
+```{r}
+family_global_summary <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(TaxRank == "F") %>%
+  group_by(Name2) %>%
+  summarise(
+    total_reads = sum(Reads, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    global_relative_abundance = total_reads / sum(total_reads),
+    threshold_group = case_when(
+      global_relative_abundance >= 0.10 ~ ">=10%",
+      global_relative_abundance >= 0.005 ~ ">=0.5%",
+      TRUE ~ "<0.5%"
+    )
+  ) %>%
+  arrange(desc(global_relative_abundance))
+
+family_global_summary %>% filter(global_relative_abundance >= 0.005)
+family_global_summary %>% filter(global_relative_abundance >= 0.10)
+
+write_csv(family_global_summary, "family_global_summary.csv")
+
+# Versión para el manuscrito: familias con abundancia global >=0.5 %.
+# La abundancia se expresa como porcentaje y se conserva con dos decimales; en
+# el texto de Resultados puede redondearse posteriormente a una cifra decimal.
+family_global_summary_paper <- family_global_summary %>%
+  filter(global_relative_abundance >= 0.005) %>%
+  transmute(
+    Family = Name2,
+    `Pooled family-level reads` = total_reads,
+    `Global relative abundance (%)` = round(
+      global_relative_abundance * 100,
+      digits = 2
+    ),
+    `Threshold group` = threshold_group
+  )
+
+write_csv(
+  family_global_summary_paper,
+  "family_global_summary_paper.csv"
+)
+
+family_per_sample_summary <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(TaxRank == "F") %>%
+  group_by(Sample) %>%
+  mutate(sample_total_reads = sum(Reads, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(relative_abundance = Reads / sample_total_reads) %>%
+  group_by(Sample, Patient, follow_up_week) %>%
+  slice_max(relative_abundance, n = 3, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(Patient, Week, desc(relative_abundance))
+
+write_csv(family_per_sample_summary, "family_per_sample_top3.csv")
+
+pathogens_summary <- tabla %>%
+  filter(grepl("Bacteria", Fullname)) %>%
+  filter(
+    (TaxRank == "S"  & Name2 == "Acinetobacter baumannii") |
+    (TaxRank == "S"  & Name2 == "Escherichia coli") |
+    (TaxRank == "G"  & Name2 == "Citrobacter") |
+    (TaxRank == "S"  & Name2 == "Klebsiella pneumoniae") |
+    (TaxRank == "G"  & Name2 == "Proteus") |
+    (TaxRank == "S"  & Name2 == "Pseudomonas aeruginosa") |
+    (TaxRank == "G1" & Name2 == "Enterobacter cloacae complex") |
+    (TaxRank == "G"  & Name2 == "Serratia") |
+    (TaxRank == "G"  & Name2 == "Salmonella") |
+    (TaxRank == "G"  & Name2 == "Shigella") |
+    (TaxRank == "G"  & Name2 == "Staphylococcus") |
+    (TaxRank == "G"  & Name2 == "Enterococcus") |
+    (TaxRank == "G"  & Name2 == "Streptococcus") |
+    (TaxRank == "G"  & Name2 == "Burkholderia") |
+    (TaxRank == "G"  & Name2 == "Stenotrophomonas")
+  ) %>%
+  mutate(
+    Pathogen_group = case_when(
+      Name2 %in% c("Burkholderia", "Stenotrophomonas") ~ "Other NFGNB",
+      Name2 %in% c("Staphylococcus", "Enterococcus", "Streptococcus") ~ "Gram-positive bacteria",
+      Name2 %in% c("Serratia", "Salmonella", "Shigella") ~ "Other Enterobacterales",
+      TRUE ~ Name2
+    )
+  ) %>%
+  group_by(Sample, Patient, Week, follow_up_week, Pathogen_group) %>%
+  summarise(
+    reads = sum(Reads, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(Sample, Patient, Week, follow_up_week) %>%
+  mutate(
+    total_pathogen_reads = sum(reads, na.rm = TRUE),
+    relative_within_selected_pathogens = reads / total_pathogen_reads
+  ) %>%
+  ungroup() %>%
+  arrange(Patient, Week, desc(reads))
+
+write_csv(pathogens_summary, "pathogens_summary.csv")
+```
+
+
+# Tabla de taxón clínico dominante
+```{r}
+# Total de reads bacterianas por muestra
+bacterial_total_reads <- tabla %>%
+  filter(TaxRank == "D", Name2 == "Bacteria") %>%
+  select(
+    name = Sample,
+    sample = Patient,
+    week = Week,
+    total_bacterial_reads = Reads
+  )
+
+# Metadata para etiquetas de las figuras
+sample_plot_metadata <- tabla %>%
+  distinct(
+    name = Sample,
+    sample = Patient,
+    week = Week,
+    sample_plot_label,
+    sample_plot_label_2lines
+  )
+
+# Añadir % del panel y % del total bacteriano
+pathogens_summary_total <- pathogens_summary %>%
+  rename(
+    name = Sample,
+    sample = Patient,
+    week = Week
+  ) %>%
+  left_join(
+    bacterial_total_reads,
+    by = c("name", "sample", "week")
+  ) %>%
+  left_join(
+    sample_plot_metadata,
+    by = c("name", "sample", "week")
+  ) %>%
+  mutate(
+    relative_within_selected_pathogens_percent =
+      relative_within_selected_pathogens * 100,
+    
+    relative_to_total_bacteria =
+      reads / total_bacterial_reads,
+    
+    relative_to_total_bacteria_percent =
+      relative_to_total_bacteria * 100
+  )
+
+# Taxón clínicamente relevante dominante por muestra
+dominant_clinically_relevant_taxa <- pathogens_summary_total %>%
+  group_by(name, sample, week) %>%
+  slice_max(reads, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    name,
+    sample,
+    week,
+    dominant_clinically_relevant_taxon = Pathogen_group,
+    dominant_taxon_reads = reads,
+    dominant_taxon_percent_within_panel =
+      relative_within_selected_pathogens_percent,
+    dominant_taxon_percent_total_bacteria =
+      relative_to_total_bacteria_percent,
+    total_selected_taxa_reads = total_pathogen_reads,
+    total_bacterial_reads
+  )
+dominant_clinically_relevant_taxa
+write_csv(dominant_clinically_relevant_taxa, "dominant_clinically_relevant_taxa.csv")
+
+
+
+
+
+# TODOS los taxones clínicamente relevantes detectados por muestra
+clinically_relevant_taxa_all <- pathogens_summary_total %>%
+  filter(reads > 0) %>% 
+  group_by(name, sample, week) %>%
+  mutate(
+    taxon_rank_within_panel = dense_rank(desc(reads)),
+    is_dominant_clinically_relevant_taxon = taxon_rank_within_panel == 1
+  ) %>%
+  ungroup() %>%
+  transmute(
+    name,
+    sample,
+    week,
+    clinically_relevant_taxon = Pathogen_group,
+    taxon_reads = reads,
+    taxon_percent_within_panel =
+      relative_within_selected_pathogens_percent,
+    taxon_percent_total_bacteria =
+      relative_to_total_bacteria_percent,
+    taxon_rank_within_panel,
+    is_dominant_clinically_relevant_taxon,
+    total_selected_taxa_reads = total_pathogen_reads,
+    total_bacterial_reads
+  ) %>%
+  arrange(sample, week, taxon_rank_within_panel)
+
+clinically_relevant_taxa_all
+
+write_csv(
+  clinically_relevant_taxa_all,  "clinically_relevant_taxa_all.csv"
+)
+```
+
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=5, fig.height=3}
+library(tidyverse)
+library(scales)
+library(tidyr)
+
+# Data frame para heatmap
+clinical_taxa_order <- c(
+  "Acinetobacter baumannii",
+  "Pseudomonas aeruginosa",
+  "Other NFGNB",
+  "Escherichia coli",
+  "Klebsiella pneumoniae",
+  "Citrobacter",
+  "Proteus",
+  "Enterobacter cloacae complex",
+  "Other Enterobacterales",
+  "Gram-positive bacteria"
+)
+
+clinically_relevant_taxa_heatmap_df <- pathogens_summary_total %>%
+  dplyr::select(
+    name,
+    sample,
+    week,
+    follow_up_week,
+    sample_plot_label_2lines,
+    Pathogen_group,
+    relative_to_total_bacteria_percent,
+    reads
+  ) %>%
+  mutate(
+    sample_label = sample_plot_label_2lines
+  ) %>%
+  complete(
+    sample_label,
+    Pathogen_group,
+    fill = list(
+      relative_to_total_bacteria_percent = 0,
+      reads = 0
+    )
+  )
+
+# Orden de muestras
+sample_order <- pathogens_summary_total %>%
+  distinct(sample, week, sample_plot_label_2lines) %>%
+  arrange(sample, week) %>%
+  pull(sample_plot_label_2lines)
+
+# Posicion de la ultima visita de cada paciente. Se excluye el borde posterior
+# al ultimo paciente porque no separa dos pacientes distintos.
+patient_boundaries <- pathogens_summary_total %>%
+  distinct(sample, week, sample_plot_label_2lines) %>%
+  arrange(sample, week) %>%
+  mutate(sample_position = row_number()) %>%
+  group_by(sample) %>%
+  summarise(
+    xintercept = max(sample_position) + 0.5,
+    .groups = "drop"
+  ) %>%
+  filter(xintercept < length(sample_order) + 0.5)
+
+clinically_relevant_taxa_heatmap_df <- clinically_relevant_taxa_heatmap_df %>%
+  mutate(
+    sample_label = factor(sample_label, levels = sample_order),
+    # rev() hace que ggplot muestre la lista solicitada de arriba abajo.
+    Pathogen_group = factor(
+      Pathogen_group,
+      levels = rev(clinical_taxa_order)
+    )
+  )
+
+# Heatmap estilo paper, sin negro
+clinical_taxa_heatmap <- ggplot(
+  clinically_relevant_taxa_heatmap_df,
+  aes(
+    x = sample_label,
+    y = Pathogen_group,
+    fill = relative_to_total_bacteria_percent
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  scale_y_discrete(labels = taxon_plotmath_labels) +
+  geom_vline(
+    data = patient_boundaries,
+    aes(xintercept = xintercept),
+    inherit.aes = FALSE,
+    color = "#4D4D4D",
+    linewidth = 0.2
+  ) +
+  geom_text(
+    aes(
+      label = ifelse(relative_to_total_bacteria_percent >= 5,
+                     round(relative_to_total_bacteria_percent, 1),
+                     "")
+    ),
+    size = 3,
+    color = "#4D4D4D"
+  ) +
+  scale_fill_gradientn(
+    colours = c(
+      "#F7FBFA",  # casi blanco
+      "#DDF0EA",
+      "#B8E0D2",
+      "#7FCDBB",
+      "#41B6C4",
+      "#2C7FB8"
+    ),
+    trans = "sqrt",
+    name = "% total\nbacterial reads",
+    breaks = c(0, 1, 5, 10, 25, 50, 75),
+    labels = label_number(accuracy = 1),
+    limits = c(0, max(clinically_relevant_taxa_heatmap_df$relative_to_total_bacteria_percent, na.rm = TRUE)),
+    na.value = "#F5F5F5"
+  ) +
+  labs(
+    title = "Clinically relevant taxa detected by metagenomics",
+    subtitle = "Relative abundance as percentage of total bacterial reads",
+    x = "Sample",
+    y = "Clinically relevant taxon"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, color = "#4D4D4D"),
+    axis.text.y = element_text(color = "#4D4D4D"),
+    axis.title = element_text(face = "bold", color = "#4D4D4D"),
+    plot.title = element_text(face = "bold", size = 15, color = "black"),
+    plot.subtitle = element_text(size = 12, color = "#6B7280"),
+    legend.title = element_text(face = "bold", color = "#4D4D4D"),
+    legend.text = element_text(color = "#4D4D4D")
+  )
+
+clinical_taxa_heatmap
+
+ggsave(
+  filename = "clinical_taxa_percent_total_bacteria_heatmap_paper_soft.png",
+  plot = clinical_taxa_heatmap,
+  path = "./PLOTS_TAX_AUTOGENERATED/",
+  width = 10,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+
+
+# Añadir riqueza del panel clínico
+
+```{r}
+selected_taxa_richness <- pathogens_summary_total %>%
+  filter(reads > 0) %>%
+  group_by(name, sample, week) %>%
+  summarise(
+    n_clinically_relevant_taxa_detected = n_distinct(Pathogen_group),
+    selected_taxa_total_reads = sum(reads, na.rm = TRUE),
+    selected_taxa_percent_total_bacteria = 
+      100 * selected_taxa_total_reads / first(total_bacterial_reads),
+    .groups = "drop"
+  )
+selected_taxa_richness
+write_csv(selected_taxa_richness, "selected_taxa_richness.csv")
+```
