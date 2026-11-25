@@ -1,5 +1,5 @@
 ---
-title: "Controles"
+title: "Controls"
 output: html_document
 ---
 
@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Load Libraries
 ```{r LOAD LIBRARIES, include=FALSE}
-#Cargamos las librerías necesarias para el análisis.
+# Load the packages required for the analysis.
 library(dplyr)
 library(tidyverse)
 library(WriteXLS)
@@ -40,7 +40,7 @@ control_samples <- tribble(
 )
 ```
 
-# Tabla de composición esperada para Community y DNA
+# Expected composition of Community and DNA controls
 ```{r}
 expected_standard <- tribble(
   ~species,                         ~expected_percent,
@@ -57,7 +57,7 @@ expected_standard <- tribble(
 )
 ```
 
-# Tabla de composición esperada paara Gut
+# Expected composition of Gut controls
 ```{r}
 expected_gut <- tribble(
   ~species,                           ~expected_percent,
@@ -95,17 +95,17 @@ expected_composition <- bind_rows(
 ) %>%
   select(control_type, species, expected_percent)
 
-# Umbral mínimo para la validación principal. La composición completa se
-# conserva en expected_composition, pero no se evalúan cuantitativamente los
-# taxones cuya abundancia teórica es inferior al 0.1 %.
+# Minimum threshold for the main validation. Retain the full composition
+# in expected_composition, but do not quantitatively assess taxa
+# with expected abundances below 0.1%.
 min_expected_percent <- 0.1
 ```
 
 
-# Controles taxonomía
+# Taxonomic profiling of controls
 
 ```{r}
-#Cargar en una única tabla todos los report de bracken
+# Load all Bracken reports into a single table.
 files = dir("../TAX-TAXPROFILER/bracken/db2/",pattern = ".report_bracken_species.txt", full.names = T)
 tabla_raw <- import_kraken(files,threads = 20)
 
@@ -125,7 +125,7 @@ tabla <- tabla_raw %>%
 DT::datatable(tabla[1:6])
 ```
 
-# Extraer únicamente los resultados de Kraken a nivel de especie
+# Extract species-level Kraken results only
 ```{r}
 observed_species <- tabla %>%
   filter(TaxRank == "S") %>%
@@ -153,7 +153,7 @@ observed_species <- tabla %>%
   left_join(control_samples, by = "Sample")
 ```
 
-Crear todas las combinaciones esperadas por muestra
+Create all expected combinations for each sample.
 ```{r}
 comparison_design <- control_samples %>%
   left_join(
@@ -163,7 +163,7 @@ comparison_design <- control_samples %>%
   filter(expected_percent >= min_expected_percent)
 ```
 
-Comprobar primero los nombres que no coinciden
+First check names that do not match.
 ```{r}
 expected_not_matched <- comparison_design %>%
   anti_join(
@@ -180,14 +180,14 @@ expected_not_matched <- comparison_design %>%
 
 expected_not_matched %>% select(species) %>% unique()
 ```
-Lactobacillus fermentum = "Limosilactobacillus fermentum" (CAMBIADO)
-Saccharomyces cerevisiae = HONGO			
-Cryptococcus neoformans	= HONGO	
-Candida albicans	= HONGO
+Lactobacillus fermentum = "Limosilactobacillus fermentum" (RENAMED)
+Saccharomyces cerevisiae = FUNGUS
+Cryptococcus neoformans = FUNGUS
+Candida albicans = FUNGUS
 
 
 
-# Tabla final esperado–observado
+# Final expected-versus-observed table
 
 ```{r}
 comparison <- comparison_design %>%
@@ -262,7 +262,7 @@ not_detected <- comparison %>%
 
 not_detected
 ```
-# Para resumir cuántas réplicas recuperaron cada microorganismo:
+# Number of replicates recovering each microorganism
 ```{r}
 replicate_recovery <- comparison %>%
   group_by(
@@ -440,12 +440,12 @@ p_controls <- ggplot(
 p_controls
 ```
 
-# Heatmap de abundancia esperada frente a observada
+# Heatmap of expected versus observed abundance
 
-El heatmap utiliza una escala lineal y solamente incluye los microorganismos con
-una abundancia esperada igual o superior al 0.1 %. Cada panel corresponde a una
-muestra control y contiene una columna con la abundancia teórica y otra con la
-abundancia estimada por Bracken.
+The heatmap uses a linear scale and includes only microorganisms with an
+expected abundance of at least 0.1%. Each panel corresponds to a control sample
+and contains one column for the expected abundance and another for the
+abundance estimated by Bracken.
 
 ```{r controls-expected-observed-heatmap, warning=FALSE, message=FALSE, echo=FALSE, fig.width=11, fig.height=8}
 controls_heatmap_data <- comparison %>%

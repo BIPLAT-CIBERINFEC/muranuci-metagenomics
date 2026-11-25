@@ -1,11 +1,11 @@
 # ===================================================
-# FUNCIONES COMUNES PARA GRÁFICOS TAXONÓMICOS
+# SHARED FUNCTIONS FOR TAXONOMIC PLOTS
 # MURANUCI
 # ===================================================
 
 # ---------------------------------------------------
-# Paleta fija usada en los plots originales
-# 15 colores para top15 + gris para Others
+# Fixed taxonomic colour palette.
+# Fifteen colours for the top 15 taxa, plus grey for Others.
 # ---------------------------------------------------
 fixed_taxonomy_palette <- c(
   "#E6194B", "#3CB44B", "#FFE119", "#4363D8",
@@ -16,9 +16,9 @@ fixed_taxonomy_palette <- c(
 
 others_colour <- "#A9A9A9"
 
-# Formato científico para etiquetas taxonómicas de género/especie.
-# Las categorías agregadas permanecen en redonda y, en el complejo de
-# E. cloacae, solo el nombre taxonómico aparece en cursiva.
+# Scientific formatting for genus and species labels.
+# Keep aggregated categories in roman type; for the
+# E. cloacae complex, italicise only the taxonomic name.
 taxon_plotmath_labels <- function(x) {
   x <- as.character(x)
   aggregate_labels <- c(
@@ -53,8 +53,8 @@ taxon_plotmath_strings <- function(x) {
 
 
 # ---------------------------------------------------
-# Crear paleta fija con nombres de taxones
-# Mantiene Others siempre en gris y al final
+# Create a fixed palette named by taxon.
+# Keep Others grey and last in the order.
 # ---------------------------------------------------
 make_fixed_cols <- function(taxa, others_label = "Others") {
   
@@ -77,9 +77,9 @@ make_fixed_cols <- function(taxa, others_label = "Others") {
 
 
 # ---------------------------------------------------
-# Normalizar IDs de paciente y semana para figuras
-# Usa Patient = PAC1, PAC2...
-# Usa follow_up_week = W0, W1, W2
+# Standardise patient and week identifiers for plots.
+# Use Patient = PAC1, PAC2, ...
+# Use follow_up_week = W0, W1, W2.
 # ---------------------------------------------------
 prepare_patient_week_labels <- function(tabla) {
   
@@ -107,7 +107,7 @@ prepare_patient_week_labels <- function(tabla) {
 
 
 # ---------------------------------------------------
-# Tema común para todos los gráficos taxonómicos
+# Shared theme for all taxonomic plots.
 # ---------------------------------------------------
 theme_taxonomy <- function(base_size = 16) {
   theme_minimal(base_size = base_size) +
@@ -128,8 +128,8 @@ theme_taxonomy <- function(base_size = 16) {
 
 
 # ---------------------------------------------------
-# Gráfico rank-abundance con umbrales
-# Ejemplo: Family 10% y 0.5%
+# Rank-abundance plot with thresholds.
+# Example: family-level thresholds of 10% and 0.5%.
 # ---------------------------------------------------
 plot_rank_abundance_thresholds <- function(
   tabla,
@@ -202,8 +202,8 @@ plot_rank_abundance_thresholds <- function(
 
 
 # ---------------------------------------------------
-# Top 15 global por Reads + Others
-# Orden alfabético en leyenda y stack
+# Global top 15 taxa by reads, plus Others.
+# Alphabetical order in the legend and stacked bars.
 # ---------------------------------------------------
 plot_top15_global <- function(
   tabla,
@@ -215,7 +215,7 @@ plot_top15_global <- function(
   tabla <- prepare_patient_week_labels(tabla)
   
   # ---------------------------------------------------
-  # 0) Filtrar a Bacteria + rango taxonómico
+  # 0) Filter to Bacteria and the selected taxonomic rank.
   # ---------------------------------------------------
   tabla_rank_raw <- tabla %>%
     filter(grepl("Bacteria", Fullname)) %>%
@@ -223,7 +223,7 @@ plot_top15_global <- function(
     rename(Taxon = Name2)
   
   # ---------------------------------------------------
-  # 1) Top 15 taxones globales por reads
+  # 1) Global top 15 taxa by reads.
   # ---------------------------------------------------
   global_reads <- tabla_rank_raw %>%
     group_by(Taxon) %>%
@@ -238,12 +238,12 @@ plot_top15_global <- function(
     pull(Taxon)
   
   # ---------------------------------------------------
-  # 2) Orden alfabético de los top15 + Others al final
+  # 2) Alphabetical order of the top 15 taxa, with Others last.
   # ---------------------------------------------------
   taxon_levels <- c(sort(top15_taxa), "Others")
   
   # ---------------------------------------------------
-  # 3) Preparar datos para plot: colapsar a Others
+  # 3) Prepare plot data: combine remaining taxa into Others.
   # ---------------------------------------------------
   tabla_plot <- tabla_rank_raw %>%
     mutate(
@@ -261,7 +261,7 @@ plot_top15_global <- function(
     )
   
   # ---------------------------------------------------
-  # 4) Paleta fija siguiendo ese orden alfabético
+  # 4) Fixed palette following the alphabetical order.
   # ---------------------------------------------------
   cols <- make_fixed_cols(taxon_levels)
   
@@ -302,9 +302,9 @@ plot_top15_global <- function(
 
 
 # ---------------------------------------------------
-# Taxones por umbral global de Reads + Others
-# Orden alfabético en leyenda y stack
-# Ejemplo: Family >= 10% o Family >= 0.5%
+# Taxa selected by a global read-abundance threshold, plus Others.
+# Alphabetical order in the legend and stacked bars.
+# Example: family-level abundance >=10% or >=0.5%.
 # ---------------------------------------------------
 plot_global_threshold <- function(
   tabla,
@@ -317,7 +317,7 @@ plot_global_threshold <- function(
   tabla <- prepare_patient_week_labels(tabla)
   
   # ---------------------------------------------------
-  # 0) Filtrar a Bacteria + rango taxonómico
+  # 0) Filter to Bacteria and the selected taxonomic rank.
   # ---------------------------------------------------
   tabla_rank_raw <- tabla %>%
     filter(grepl("Bacteria", Fullname)) %>%
@@ -325,7 +325,7 @@ plot_global_threshold <- function(
     rename(Taxon = Name2)
   
   # ---------------------------------------------------
-  # 1) Abundancia global por reads
+  # 1) Global relative abundance based on reads.
   # ---------------------------------------------------
   global_reads <- tabla_rank_raw %>%
     group_by(Taxon) %>%
@@ -343,12 +343,12 @@ plot_global_threshold <- function(
     pull(Taxon)
   
   # ---------------------------------------------------
-  # 2) Orden alfabético de los taxones seleccionados + Others al final
+  # 2) Alphabetical order of selected taxa, with Others last.
   # ---------------------------------------------------
   taxon_levels <- c(sort(taxa_keep), "Others")
   
   # ---------------------------------------------------
-  # 3) Preparar datos para plot
+  # 3) Prepare plot data.
   # ---------------------------------------------------
   tabla_plot <- tabla_rank_raw %>%
     mutate(
@@ -366,7 +366,7 @@ plot_global_threshold <- function(
     )
   
   # ---------------------------------------------------
-  # 4) Paleta fija siguiendo ese orden alfabético
+  # 4) Fixed palette following the alphabetical order.
   # ---------------------------------------------------
   cols <- make_fixed_cols(taxon_levels)
   

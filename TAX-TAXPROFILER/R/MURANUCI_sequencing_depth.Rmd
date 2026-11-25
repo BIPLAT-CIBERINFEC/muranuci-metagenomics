@@ -3,12 +3,12 @@ title: "MURANUCI sequencing depth"
 output: html_document
 ---
 
-# Objetivo
+# Objective
 
-Este documento extrae automáticamente del informe de MultiQC el número de reads
-obtenidas para cada muestra, las reads conservadas tras el control de calidad y
-una estimación de las reads no humanas. Los cálculos se realizan en millones de
-pares de reads porque la secuenciación es paired-end.
+This document automatically extracts the number of reads obtained per sample,
+reads retained after quality control and an estimate of non-host reads from the
+MultiQC report. Calculations are expressed in millions of read pairs because
+the sequencing data are paired-end.
 
 ```{r setup, message=FALSE, warning=FALSE}
 library(dplyr)
@@ -20,12 +20,12 @@ library(rvest)
 library(ggplot2)
 ```
 
-# Funciones auxiliares
+# Helper functions
 
 ```{r helper-functions}
-# Extrae, para cada fila de General Statistics, el atributo numérico `val` de
-# una columna concreta. Usamos val porque contiene el valor preciso, el número
-# visible del MultiQC está redondeado.
+# Extract the numeric val attribute from a specified column in each
+# General Statistics row. It contains the precise value; the number
+# displayed in MultiQC is rounded.
 extract_general_stat <- function(rows, css_class) {
   map_dbl(rows, function(row) {
     cell <- html_element(row, paste0("td.", css_class))
@@ -34,7 +34,7 @@ extract_general_stat <- function(rows, css_class) {
   })
 }
 
-# Separa el nombre común de la muestra, la etapa de FastQC y el mate R1/R2.
+# Parse the shared sample name, FastQC stage and R1/R2 mate.
 parse_fastqc_name <- function(sample_name) {
   tibble(
     multiqc_name = sample_name,
@@ -45,7 +45,7 @@ parse_fastqc_name <- function(sample_name) {
 }
 ```
 
-# Lectura de General Statistics de MultiQC
+# Read MultiQC General Statistics
 
 ```{r read-multiqc}
 
@@ -79,13 +79,13 @@ multiqc_stats <- tibble(
 )
 ```
 
-# Recuento de pares antes y después del control de calidad
+# Read-pair counts before and after quality control
 
-FastQC analiza R1 y R2 por separado. Por ello, el número de pares no se calcula
-sumando ambos archivos, sino comprobando que contienen el mismo número de reads
-y tomando su media. Esta media evita pequeñas diferencias debidas al
-procesamiento, aunque se conserva una columna de control con la diferencia entre
-R1 y R2.
+FastQC analyses R1 and R2 separately. Read-pair counts are therefore calculated
+by checking that both files contain the same number of reads and taking their
+mean, rather than adding the counts. Using the mean accommodates small
+differences due to processing; a check column retains the difference between
+R1 and R2.
 
 ```{r process-fastqc}
 fastqc_counts <- multiqc_stats %>%
@@ -124,12 +124,12 @@ if (any(fastqc_counts$raw_R1_R2_difference > 0.001, na.rm = TRUE)) {
 }
 ```
 
-# Integración de fastp y eliminación de reads humanas
+# Integrate fastp results and host-read removal
 
-fastp comunica el total de reads individuales de ambos mates. Se divide entre
-dos para expresarlo como pares. MultiQC proporciona el porcentaje de alineamiento
-de Bowtie2 contra el genoma hospedador; se utiliza para estimar los equivalentes
-de pares no humanos que quedan disponibles para el perfil taxonómico.
+fastp reports the total number of individual reads across both mates. This is
+divided by two to express the count as read pairs. MultiQC provides the Bowtie2
+alignment percentage against the host genome, which is used to estimate the
+non-host read-pair equivalents available for taxonomic profiling.
 
 ```{r combine-processing-stages}
 processing_counts <- multiqc_stats %>%
@@ -166,7 +166,7 @@ sequencing_depth_all <- fastqc_counts %>%
   arrange(sample_type, sample_id)
 ```
 
-# Correspondencia con los identificadores del artículo
+# Map to manuscript sample identifiers
 
 ```{r clinical-sample-names}
 private_map_root <- normalizePath(getwd(), mustWork = TRUE)
@@ -203,11 +203,11 @@ sequencing_depth_clinical <- sequencing_depth_all %>%
   arrange(patient_id, visit)
 
 if (any(is.na(sequencing_depth_clinical$patient_id))) {
-  warning("Hay muestras clínicas sin correspondencia con un identificador PAC/visita.")
+  warning("Some clinical samples could not be mapped to a PAC/visit identifier.")
 }
 ```
 
-# Tablas de salida
+# Output tables
 
 ```{r save-tables}
 write.csv(sequencing_depth_all, "./PLOTS_TAX_SEQUENCING_DEPTH/sequencing_read_counts_all_samples.csv", row.names = FALSE, na = "")
@@ -225,7 +225,7 @@ sequencing_depth_clinical %>%
   )
 ```
 
-# Gráfico de profundidad de secuenciación
+# Sequencing-depth plot
 
 ```{r sequencing-depth-plot, fig.width=6, fig.height=7}
 plot_data <- sequencing_depth_clinical %>%
@@ -336,7 +336,7 @@ ggsave(
 )
 ```
 
-# Resumen para resultados
+# Summary statistics for Results
 
 ```{r summary-statistics}
 sequencing_depth_summary <- sequencing_depth_clinical %>%
