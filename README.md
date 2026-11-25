@@ -31,7 +31,7 @@ The taxonomy document also contains auxiliary plots. The main ARG script exports
 
 ## Data availability and scope
 
-Pipeline inputs, clinical datasets, generated analysis tables and the private sample-identifier mapping are not distributed in this repository. Selected manually curated contig findings are included as three CSV files in `ARGs/supplementary/paper_tables/curation/`; these are reviewed derived data, not the original pipeline inputs or private mapping.
+Pipeline inputs, clinical datasets, generated analysis tables, manually curated contig data and the private sample-identifier mapping are not distributed in this repository. The supplementary table generator requires three local CSV files in `ARGs/supplementary/paper_tables/curation/`, in addition to the local analysis tables and saved alignment reports. The required CSV structure is documented in that directory.
 
 The scripts require existing pipeline outputs and local metadata. Cloning the repository alone does not provide a complete runnable dataset. The private mapping associates original source identifiers with the patient and visit identifiers used in the manuscript.
 

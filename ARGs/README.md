@@ -16,7 +16,7 @@ Downstream analysis of ARIBA–ResFinder and nf-core/funcscan outputs, compariso
 
 ## Data availability
 
-This repository distributes analysis code, documentation and selected manually curated supplementary contig data. Pipeline inputs, analysis data and the private sample-identifier mapping are not included. Execution requires the files listed below in the local project layout; cloning the repository alone does not provide a complete runnable dataset.
+This repository distributes analysis code and documentation. Pipeline inputs, analysis data, manually curated supplementary contig data and the private sample-identifier mapping are not included. Execution requires the files listed below in the local project layout; cloning the repository alone does not provide a complete runnable dataset.
 
 ## Required inputs
 
@@ -86,7 +86,7 @@ The main script writes six CSV files to `tables/`:
 
 ## Supplementary tables
 
-`supplementary/paper_tables/generate_tables.py` generates supplementary tables from `tables/clinical_ARG_taxonomic_context_summary.csv`, the saved reports in `supplementary/paper_tables/alignment_reports/`, and three CSV files in `supplementary/paper_tables/curation/`. The CSV files contain the selected contig–ARG records, BLAST query definitions and manually reviewed findings and interpretations. See the [curation data documentation](supplementary/paper_tables/curation/README.md) for their columns and editing rules. It uses Python's standard library and does not contact NCBI or execute BLAST.
+`supplementary/paper_tables/generate_tables.py` generates supplementary tables from `tables/clinical_ARG_taxonomic_context_summary.csv`, the saved reports in `supplementary/paper_tables/alignment_reports/`, and three local CSV files in `supplementary/paper_tables/curation/`. None of these inputs are distributed in the repository. The curated CSV files contain the selected contig–ARG records, BLAST query definitions and manually reviewed findings and interpretations. See the [curation data documentation](supplementary/paper_tables/curation/README.md) for their columns and editing rules. It uses Python's standard library and does not contact NCBI or execute BLAST.
 
 From the project root:
 

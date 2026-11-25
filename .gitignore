@@ -50,7 +50,5 @@ ARGs/inputs/
 presentacion_contexto_ARG/
 Propuesta_Ecosistema_Metaphlan/
 
-# Reviewed supplementary contig data (not raw pipeline inputs).
-!ARGs/supplementary/paper_tables/curation/curated_contigs.csv
-!ARGs/supplementary/paper_tables/curation/blast_queries.csv
-!ARGs/supplementary/paper_tables/curation/contig_interpretations.csv
+# Curated contig data are retained locally and are not distributed.
+ARGs/supplementary/paper_tables/curation/*.csv

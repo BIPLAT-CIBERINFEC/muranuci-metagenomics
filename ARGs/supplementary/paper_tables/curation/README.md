@@ -1,14 +1,14 @@
 # Curated contig-context data
 
-These three CSV files contain the manually selected records and interpretations used to build Supplementary Tables S5A and S5B. They contain public manuscript sample labels (PAC and visit), not the private laboratory-to-patient mapping. They are derived study data, not results calculated automatically by BLAST or by the table generator.
+The supplementary table generator requires three local CSV files containing the manually selected records and interpretations used to build Supplementary Tables S5A and S5B. These files are not distributed in the repository. This document describes their required structure. They use manuscript sample labels (PAC and visit), not the private laboratory-to-patient mapping. They contain derived study data, not results calculated automatically by BLAST or by the table generator.
 
 ## Files
 
 | File | Unit and contents |
 |---|---|
-| `curated_contigs.csv` | One row per sample–contig–ARG combination: 11 records representing 10 sample-specific contigs |
-| `blast_queries.csv` | One row per reviewed sequence query: 13 records, including contigs and flanking regions |
-| `contig_interpretations.csv` | One row per sample-specific contig: 10 records with manually reviewed findings and limitations |
+| `curated_contigs.csv` | One row per sample–contig–ARG combination |
+| `blast_queries.csv` | One row per reviewed sequence query, including contigs and flanking regions |
+| `contig_interpretations.csv` | One row per sample-specific contig, with manually reviewed findings and limitations |
 
 ## Contig records
 
@@ -20,7 +20,7 @@ These three CSV files contain the manually selected records and interpretations 
 
 `evidence_available` describes the evidence reviewed. `source_reports` lists any available detailed alignment report filenames, separated by semicolons. Files are read from the sibling `alignment_reports/` directory; they are not included in the public repository. Empty report fields mean that no detailed alignment report is associated with that query here; they do not mean that BLAST found no matches.
 
-`source_report_order` lists the corresponding report order numbers, also separated by semicolons. These retain the row ordering of the reviewed alignments in Table S5B. Multiple reports for one query must have matching filename/order entries. The current data associate nine reports with six complete-contig queries.
+`source_report_order` lists the corresponding report order numbers, also separated by semicolons. These retain the row ordering of the reviewed alignments in Table S5B. Multiple reports for one query must have matching filename/order entries.
 
 ## Interpretations
 
