@@ -1,0 +1,2573 @@
+---
+title: "MURANUCI"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load libraries
+```{r LOAD LIBRARIES, include=FALSE}
+# Load the packages required for the analysis.
+library(tidyverse)
+
+find_project_root <- function(start = getwd()) {
+  current <- normalizePath(start, mustWork = TRUE)
+  repeat {
+    if (file.exists(file.path(current, "metadata", "MURANUCI_sample_id_map.csv"))) {
+      return(current)
+    }
+    parent <- dirname(current)
+    if (identical(parent, current)) {
+      stop("Could not find metadata/MURANUCI_sample_id_map.csv starting from ", start)
+    }
+    current <- parent
+  }
+}
+
+project_root <- find_project_root()
+metadata_dir <- file.path(project_root, "metadata")
+tables_dir <- file.path(project_root, "results", "ARGs", "tables")
+plots_dir <- file.path(project_root, "results", "ARGs", "figures")
+dir.create(tables_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(plots_dir, showWarnings = FALSE, recursive = TRUE)
+
+clinical_genes <- c(
+  "blaKPC_3",
+  "blaVIM_1",
+  "blaCTX_M_9",
+  "blaCTX_M_15",
+  "blaCTX_M_55",
+  "blaNDM_5",
+  "blaOXA_48"
+)
+
+# Format gene labels for plots: italic bla and the variant as a subscript.
+gene_plotmath_strings <- function(x) {
+  map_chr(x, function(label) {
+    if (is.na(label) || label == "") {
+      return("")
+    }
+
+    if (!str_detect(label, "^bla")) {
+      return(paste0("'", label, "'"))
+    }
+
+    gene_variant <- label %>%
+      str_remove("^bla") %>%
+      str_replace_all("_", "-")
+
+    paste0("italic(bla)[plain('", gene_variant, "')]")
+  })
+}
+
+gene_facet_labeller <- as_labeller(
+  gene_plotmath_strings,
+  default = label_parsed
+)
+
+# Bold gene labels for headers in the main comparison plot.
+gene_bold_plotmath_strings <- function(x) {
+  map_chr(x, function(label) {
+    if (is.na(label) || label == "") {
+      return("")
+    }
+
+    if (!str_detect(label, "^bla")) {
+      return(paste0("bold('", label, "')"))
+    }
+
+    gene_variant <- label %>%
+      str_remove("^bla") %>%
+      str_replace_all("_", "-")
+
+    paste0("bolditalic(bla)[bold('", gene_variant, "')]")
+  })
+}
+
+gene_facet_bold_labeller <- as_labeller(
+  gene_bold_plotmath_strings,
+  default = label_parsed
+)
+
+gene_cell_plotmath_strings <- function(x) {
+  map_chr(x, function(value) {
+    if (is.na(value) || value == "") {
+      return("")
+    }
+
+    expressions <- value %>%
+      str_split(";\\s*") %>%
+      .[[1]] %>%
+      gene_plotmath_strings()
+
+    if (length(expressions) == 1) {
+      return(expressions)
+    }
+
+    reduce(
+      expressions,
+      function(upper, lower) paste0("atop(", upper, ",", lower, ")")
+    )
+  })
+}
+
+controls_list <- c(
+  "Community-2",
+  "COMUNITY-1",
+  "CONTROL-DNA-2",
+  "DNA-CONTROL-1",
+  "Gut-1",
+  "Gut-microbiome-2"
+)
+
+# funcscan tools used in all main analyses.
+funcscan_tools_primary <- c("ABRicate", "AMRFinderPlus")
+
+normalise_sample_name <- function(x) {
+  source_names <- str_remove(x, "\\..*$")
+  mapped_names <- sample_id_newnames$name[
+    match(source_names, sample_id_newnames$source_sample_id)
+  ]
+  coalesce(mapped_names, source_names)
+}
+
+# Numeric visit is the single visit key; W is used only for display.
+week_plot_labels <- function(x) {
+  factor(x, levels = 0:2, labels = paste0("W", 0:2))
+}
+
+sample_id_newnames <- read_csv(
+  file.path(metadata_dir, "MURANUCI_sample_id_map.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(follow_up_week = as.integer(follow_up_week))
+
+culture_metadata <- read_csv(
+  file.path(metadata_dir, "MURANUCI_culture_metadata.csv"),
+  show_col_types = FALSE
+) %>%
+  mutate(follow_up_week = as.integer(follow_up_week))
+
+stopifnot(
+  !anyDuplicated(sample_id_newnames[c("patient_id", "follow_up_week")]),
+  !anyDuplicated(sample_id_newnames$name),
+  !anyDuplicated(culture_metadata[c("patient_id", "follow_up_week")]),
+  all(sample_id_newnames$follow_up_week %in% 0:2),
+  all(culture_metadata$follow_up_week %in% 0:2),
+  nrow(anti_join(culture_metadata, sample_id_newnames,
+                by = c("patient_id", "follow_up_week"))) == 0L
+)
+
+# Internal analysis links are retrieved from the private mapping only.
+culture_wgs_reference <- culture_metadata %>%
+  left_join(
+    sample_id_newnames %>%
+      select(patient_id, follow_up_week, name, sample),
+    by = c("patient_id", "follow_up_week")
+  )
+
+add_patient_labels <- function(df) {
+  df %>%
+    select(-any_of(c("sample", "patient_id", "follow_up_week"))) %>%
+    left_join(
+      sample_id_newnames %>%
+        select(name, sample, patient_id, follow_up_week),
+      by = "name"
+    ) %>%
+    mutate(patient_id = factor(patient_id, levels = paste0("PAC", 1:8)))
+}
+
+```
+
+# 1. ARIBA-ResFinder
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=4, fig.height=3}
+# Load ARIBA output generated with ResFinder.
+resfinder_summary <- read.delim(
+  file.path(project_root, "results", "ARGs", "inputs", "ariba", "out_summary_resfinder.csv"),
+  header = TRUE,
+  sep = ","
+)
+
+# Keep only rows with detected matches.
+#resfinder_summary_MatchYes <- resfinder_summary %>% filter(if_any(ends_with(".match"), ~ . == "yes"))
+
+ariba_summary_clean <- resfinder_summary %>% 
+  mutate(name = str_remove(name, "^.*/run/")) %>%
+  mutate(name = str_replace(name, "/.*tsv", ""))
+
+
+# 1. Match each .ref_seq column to its corresponding .match column.
+columnas_match <- names(ariba_summary_clean)[
+  endsWith(names(ariba_summary_clean), ".match")
+]
+columnas_refseq <- names(ariba_summary_clean)[
+  endsWith(names(ariba_summary_clean), ".ref_seq")
+]
+
+columnas_validas <- columnas_refseq[sapply(columnas_refseq, function(col) {
+  sub(".ref_seq$", ".match", col) %in% columnas_match
+})]
+
+# 2. Reshape .match/.ref_seq pairs into long format and retain
+#    only detections with .match == "yes".
+ariba_hits_all <- map_dfr(columnas_validas, function(refseq_col) {
+  match_col <- sub(".ref_seq$", ".match", refseq_col)
+  
+  tibble(
+    name = ariba_summary_clean$name,
+    cluster = sub(".ref_seq$", "", refseq_col),
+    ariba_match = as.character(ariba_summary_clean[[match_col]]),
+    resfinder_ref = as.character(ariba_summary_clean[[refseq_col]])
+  )
+}) %>%
+  filter(
+    str_to_lower(ariba_match) == "yes",
+    !is.na(resfinder_ref),
+    resfinder_ref != ""
+  ) %>%
+  mutate(
+    AMR = str_extract(resfinder_ref, "^[^.]+")
+  ) %>%
+  distinct(name, cluster, resfinder_ref, AMR, .keep_all = TRUE)
+
+# 3. Create a separate subset for the seven selected clinically relevant alleles.
+ariba_hits_clinical <- ariba_hits_all %>%
+  filter(AMR %in% clinical_genes)
+
+# 4. Include all ARIBA samples, including those with no detections
+#    from the selected clinically relevant gene panel.
+ariba_samples <- ariba_summary_clean %>%
+  select(name) %>%
+  distinct() %>%
+  filter(!name %in% controls_list) %>%
+  mutate(name = normalise_sample_name(name)) %>%
+  add_patient_labels()
+
+# Apply the same sample-name normalisation to the hits.
+ariba_hits_all <- ariba_hits_all %>%
+  mutate(name = normalise_sample_name(name))
+
+ariba_hits_clinical <- ariba_hits_all %>%
+  filter(AMR %in% clinical_genes)
+
+# 5. Complete sample-by-gene combinations to include "Not Detected".
+table_gather <- ariba_samples %>%
+  tidyr::crossing(AMR = clinical_genes) %>%
+  left_join(
+    ariba_hits_clinical %>%
+      distinct(name, AMR) %>%
+      mutate(ariba = "Detected"),
+    by = c("name", "AMR")
+  ) %>%
+  mutate(
+    ariba = replace_na(ariba, "Not Detected"),
+    ariba = factor(ariba, levels = c("Detected", "Not Detected"))
+  )
+```
+
+## Plot: presence-absence
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=7}
+# Create the heatmap.
+plot_ariba_resfinder <- ggplot(
+  table_gather,
+  aes(x = week_plot_labels(follow_up_week), y = patient_id, fill = ariba)
+) +
+  geom_tile(color = "white") +
+  scale_y_discrete(limits = rev(paste0("PAC", 1:8))) +
+  facet_wrap(
+    ~AMR,
+    scales = "free",
+    labeller = labeller(AMR = gene_facet_labeller)
+  ) +  # Facet by AMR type.
+  scale_fill_manual(values = c("Not Detected" = "#E0E0E0", "Detected" = "#D32F2F")) +
+  theme_minimal() +
+  labs(
+    title = "AMR Detection with ARIBA and ResFinder",
+    x = "Follow-up week",
+    y = "Patient ID",
+    fill = "AMR"
+  ) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold", size = 16),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+
+plot_ariba_resfinder
+
+# Save the plot as PNG
+# ggsave(
+#   file.path(plots_dir, "ARIBA-resfinder.png"),
+#   plot = plot_ariba_resfinder,
+#   width = 7,
+#   height = 7,
+#   dpi = 300
+# )
+```
+
+
+
+# 2. nf-core/funcscan
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=4, fig.height=3}
+# ---------------------------------------------------
+# 0) Load nf-core/funcscan output.
+# ---------------------------------------------------
+funcscan_arg <- readr::read_tsv(
+  file.path(project_root, "results", "ARGs", "inputs", "funcscan", "hamronization_complete_summary_taxonomy.tsv.gz"),
+  show_col_types = FALSE
+)
+
+names(funcscan_arg)
+
+
+# ---------------------------------------------------
+# 2) Prepare the cleaned funcscan table.
+# ---------------------------------------------------
+# Retain all hits reported by the tools without requiring ARO annotations
+# or applying additional identity or coverage filters.
+funcscan_hits_all <- funcscan_arg %>%
+  mutate(
+    sample_id_original = sample_id,
+    gene_symbol_original = gene_symbol,
+    analysis_software_name_original = analysis_software_name,
+    
+    # Clean sample_id while retaining the original value.
+    name = sample_id,
+    name = str_remove(name, "_retrieved-genes-.*\\.fargene$"),
+    name = normalise_sample_name(name),
+    
+    # Format the tool name.
+    tool = case_when(
+      str_to_lower(analysis_software_name) == "abricate" ~ "ABRicate",
+      str_to_lower(analysis_software_name) == "amrfinderplus" ~ "AMRFinderPlus",
+      str_to_lower(analysis_software_name) == "rgi" ~ "RGI",
+      str_to_lower(analysis_software_name) == "fargene" ~ "fARGene",
+      TRUE ~ analysis_software_name
+    ),
+    
+    # Create a comparable name while retaining gene_symbol_original.
+    AMR = gene_symbol,
+    AMR = str_replace_all(AMR, "-", "_"),
+    AMR = str_replace_all(AMR, " ", "_"),
+    
+    # Convert RGI names such as CTX-M-15 to blaCTX_M_15.
+    AMR = case_when(
+      str_detect(AMR, "^bla") ~ AMR,
+      str_detect(AMR, "^(CTX_M|KPC|NDM|VIM|OXA)_") ~ paste0("bla", AMR),
+      TRUE ~ AMR
+    )
+  ) %>%
+  filter(!name %in% controls_list) %>%
+  filter(!is.na(AMR))
+
+# ---------------------------------------------------
+# 3) Filter the AMR genes of interest.
+# ---------------------------------------------------
+# Main comparison: ABRicate and AMRFinderPlus only.
+
+# Detailed table: retain the tool, contig, database, quality and
+# taxonomy for the seven selected clinically relevant alleles.
+funcscan_clinical_hits_long <- funcscan_hits_all %>%
+  filter(
+    tool %in% funcscan_tools_primary,
+    AMR %in% clinical_genes
+  ) %>%
+  select(
+    sample_id_original,
+    name,
+    tool,
+    gene_symbol_original,
+    AMR,
+    reference_database_name,
+    reference_database_version,
+    reference_accession,
+    contig_id,
+    coverage_percentage,
+    sequence_identity,
+    taxid,
+    rank_label,
+    scientific_name,
+    mmseqs_lineage_contig
+  ) %>%
+  distinct()
+
+# Detection table: one row per sample, tool and gene. This prevents
+# duplicate heatmap cells when a gene occurs on multiple contigs or when
+# the taxonomy table contains multiple rows for the same hit.
+funcscan_clinical_detection_by_tool <- funcscan_clinical_hits_long %>%
+  select(name, tool, AMR) %>%
+  distinct()
+
+# Explicitly check that only the seven selected genes and the two
+# selected tools are included.
+stopifnot(
+  all(funcscan_clinical_detection_by_tool$tool %in% funcscan_tools_primary),
+  all(funcscan_clinical_detection_by_tool$AMR %in% clinical_genes)
+)
+
+
+# ---------------------------------------------------
+# 4) Complete sample list.
+# ---------------------------------------------------
+# Use only the clinical visits recorded in the metadata.
+# Do not create patient-week combinations that were not sampled.
+clinical_sample_visits <- ariba_samples %>%
+  filter(!is.na(patient_id), !is.na(follow_up_week)) %>%
+  semi_join(
+    sample_id_newnames,
+    by = c("patient_id", "follow_up_week")
+  ) %>%
+  distinct(name, sample, patient_id, follow_up_week)
+
+all_samples_funcscan <- clinical_sample_visits %>%
+  select(name) %>%
+  distinct()
+
+
+# ---------------------------------------------------
+# 5) Reuse visits linked to the private mapping.
+# ---------------------------------------------------
+
+all_samples_funcscan_parsed <- clinical_sample_visits
+
+
+# ---------------------------------------------------
+# 6) Genes and tools to plot.
+# ---------------------------------------------------
+
+genes_to_plot_funcscan <- funcscan_clinical_detection_by_tool %>%
+  distinct(AMR) %>%
+  arrange(AMR) %>%
+  pull(AMR)
+
+tools_to_plot_funcscan <- funcscan_clinical_detection_by_tool %>%
+  distinct(tool) %>%
+  arrange(tool) %>%
+  pull(tool)
+
+
+# ---------------------------------------------------
+# 7) Create the presence-absence table for each tool.
+# ---------------------------------------------------
+
+table_gather_funcscan_by_tool <- all_samples_funcscan_parsed %>%
+  tidyr::crossing(
+    tool = tools_to_plot_funcscan,
+    AMR = genes_to_plot_funcscan
+  ) %>%
+  left_join(
+    funcscan_clinical_detection_by_tool %>%
+      mutate(funcscan = "Detected"),
+    by = c("name", "tool", "AMR")
+  ) %>%
+  mutate(
+    funcscan = replace_na(funcscan, "Not Detected"),
+    funcscan = factor(funcscan, levels = c("Detected", "Not Detected")),
+    patient_id = factor(patient_id, levels = paste0("PAC", 1:8)),
+    follow_up_week = as.integer(follow_up_week),
+    tool = factor(
+      tool,
+      levels = funcscan_tools_primary
+    )
+  )
+```
+
+
+## Plot: presence-absence by funcscan tool
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=5, fig.height=5}
+# ---------------------------------------------------
+# ABRicate
+# ---------------------------------------------------
+
+if ("ABRicate" %in% tools_to_plot_funcscan) {
+  
+  table_gather_ABRicate <- table_gather_funcscan_by_tool %>%
+    filter(tool == "ABRicate")
+  
+  plot_funcscan_ABRicate <- ggplot(table_gather_ABRicate, aes(x = week_plot_labels(follow_up_week), y = patient_id, fill = funcscan)) +
+    geom_tile(color = "white") +
+    scale_y_discrete(limits = rev(paste0("PAC", 1:8))) +
+    facet_wrap(
+      ~ AMR,
+      scales = "free",
+      labeller = labeller(AMR = gene_facet_labeller)
+    ) +
+    scale_fill_manual(
+      values = c(
+        "Not Detected" = "#E0E0E0",
+        "Detected" = "#D32F2F"
+      )
+    ) +
+    theme_minimal() +
+    labs(
+      title = "AMR Detection with nf-core/funcscan - ABRicate",
+      x = "Follow-up week",
+      y = "Patient ID",
+      fill = "AMR"
+    ) +
+    theme(
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold", size = 16),
+      axis.text = element_text(size = 12, color = "black"),
+      axis.title = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12)
+    )
+  
+  # ggsave(
+  #   file.path(plots_dir, "FUNCSCAN-ABRicate-AMR-presence-absence.png"),
+  #   plot = plot_funcscan_ABRicate,
+  #   width = 11,
+  #   height = 10,
+  #   dpi = 300
+  # )
+}
+
+plot_funcscan_ABRicate
+
+# ---------------------------------------------------
+# AMRFinderPlus
+# ---------------------------------------------------
+
+if ("AMRFinderPlus" %in% tools_to_plot_funcscan) {
+  
+  table_gather_AMRFinderPlus <- table_gather_funcscan_by_tool %>%
+    filter(tool == "AMRFinderPlus")
+  
+  plot_funcscan_AMRFinderPlus <- ggplot(table_gather_AMRFinderPlus, aes(x = week_plot_labels(follow_up_week), y = patient_id, fill = funcscan)) +
+    geom_tile(color = "white") +
+    scale_y_discrete(limits = rev(paste0("PAC", 1:8))) +
+    facet_wrap(
+      ~ AMR,
+      scales = "free",
+      labeller = labeller(AMR = gene_facet_labeller)
+    ) +
+    scale_fill_manual(
+      values = c(
+        "Not Detected" = "#E0E0E0",
+        "Detected" = "#D32F2F"
+      )
+    ) +
+    theme_minimal() +
+    labs(
+      title = "AMR Detection with nf-core/funcscan - AMRFinderPlus",
+      x = "Follow-up week",
+      y = "Patient ID",
+      fill = "AMR"
+    ) +
+    theme(
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold", size = 16),
+      axis.text = element_text(size = 12, color = "black"),
+      axis.title = element_text(size = 14, face = "bold"),
+      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 12)
+    )
+  
+  
+  # ggsave(
+  #   file.path(
+  #     plots_dir,
+  #     "FUNCSCAN-AMRFinderPlus-AMR-presence-absence.png"
+  #   ),
+  #   plot = plot_funcscan_AMRFinderPlus,
+  #   width = 11,
+  #   height = 10,
+  #   dpi = 300
+  # )
+}
+
+plot_funcscan_AMRFinderPlus
+
+```
+
+
+
+# 3. ARIBA versus funcscan comparison
+
+## Plot: ARIBA vs funcscan
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=5, fig.height=5}
+
+# ---------------------------------------------------
+# 1) Prepare ARIBA detections.
+# ---------------------------------------------------
+
+ariba_detection <- ariba_hits_clinical %>%
+  group_by(name, AMR) %>%
+  summarise(
+    ariba_detected = TRUE,
+    ariba_resfinder_refs = paste(
+      sort(unique(resfinder_ref)),
+      collapse = "; "
+    ),
+    .groups = "drop"
+  )
+
+
+# ---------------------------------------------------
+# 2) Prepare ABRicate and AMRFinderPlus separately.
+# ---------------------------------------------------
+
+funcscan_detection <- funcscan_clinical_hits_long %>%
+  group_by(name, AMR) %>%
+  summarise(
+    abricate_detected = any(tool == "ABRicate"),
+    amrfinderplus_detected = any(tool == "AMRFinderPlus"),
+    abricate_gene_symbols = paste(
+      sort(unique(gene_symbol_original[tool == "ABRicate"])),
+      collapse = "; "
+    ),
+    amrfinderplus_gene_symbols = paste(
+      sort(unique(gene_symbol_original[tool == "AMRFinderPlus"])),
+      collapse = "; "
+    ),
+    .groups = "drop"
+  )
+
+
+# ---------------------------------------------------
+# 3) Create one row for each sampled visit and each of the seven genes.
+# ---------------------------------------------------
+
+clinical_ARG_detection_by_method <- clinical_sample_visits %>%
+  tidyr::crossing(AMR = clinical_genes) %>%
+  left_join(
+    ariba_detection,
+    by = c("name", "AMR")
+  ) %>%
+  left_join(
+    funcscan_detection,
+    by = c("name", "AMR")
+  ) %>%
+  mutate(
+    ariba_detected = replace_na(ariba_detected, FALSE),
+    abricate_detected = replace_na(abricate_detected, FALSE),
+    amrfinderplus_detected = replace_na(amrfinderplus_detected, FALSE),
+    ariba_resfinder_refs = replace_na(ariba_resfinder_refs, ""),
+    abricate_gene_symbols = replace_na(abricate_gene_symbols, ""),
+    amrfinderplus_gene_symbols = replace_na(amrfinderplus_gene_symbols, ""),
+    
+    funcscan_detected = abricate_detected | amrfinderplus_detected,
+    funcscan_tools_detected = case_when(
+      abricate_detected & amrfinderplus_detected ~ "ABRicate; AMRFinderPlus",
+      abricate_detected ~ "ABRicate",
+      amrfinderplus_detected ~ "AMRFinderPlus",
+      TRUE ~ ""
+    ),
+    
+    detection_category = case_when(
+      ariba_detected & funcscan_detected ~ "ARIBA + funcscan",
+      ariba_detected & !funcscan_detected ~ "ARIBA only",
+      !ariba_detected & funcscan_detected ~ "Funcscan only",
+      TRUE ~ "Not detected"
+    ),
+    
+    detection_category = factor(
+      detection_category,
+      levels = c(
+        "ARIBA + funcscan",
+        "ARIBA only",
+        "Funcscan only",
+        "Not detected"
+      )
+    ),
+    
+    AMR_key = AMR,
+    patient_id = factor(patient_id, levels = paste0("PAC", 1:8)),
+    follow_up_week = as.integer(follow_up_week)
+  )
+
+# Checks: 13 visits by 7 genes, with no duplicate sample-gene combinations.
+stopifnot(
+  nrow(clinical_ARG_detection_by_method) ==
+    nrow(clinical_sample_visits) * length(clinical_genes),
+  !anyDuplicated(
+    clinical_ARG_detection_by_method[c("name", "AMR")]
+  )
+)
+
+write_csv(
+  clinical_ARG_detection_by_method,
+  file.path(tables_dir, "clinical_ARG_detection_by_method.csv")
+)
+
+# ---------------------------------------------------
+# 5) Combined plot.
+# ---------------------------------------------------
+detection_cols_combined <- c(
+  "ARIBA + funcscan" = "#CC79A7",
+  "ARIBA only" = "#D55E00",
+  "Funcscan only" = "#56B4E9",
+  "Not detected" = "#E0E0E0"
+)
+
+legend_dummy_combined <- tibble(
+  follow_up_week = 0L,
+  patient_id = factor("PAC1", levels = paste0("PAC", 1:8)),
+  AMR = unique(clinical_ARG_detection_by_method$AMR)[1],
+  detection_category = factor(
+    names(detection_cols_combined),
+    levels = names(detection_cols_combined)
+  )
+)
+
+
+plot_ariba_funcscan_combined <- ggplot(
+  clinical_ARG_detection_by_method,
+  aes(x = week_plot_labels(follow_up_week), y = patient_id, fill = detection_category)
+) +
+  geom_tile(color = "white") +
+  geom_tile(
+    data = legend_dummy_combined,
+    aes(x = week_plot_labels(follow_up_week), y = patient_id, fill = detection_category),
+    inherit.aes = FALSE,
+    alpha = 0,
+    show.legend = TRUE
+  ) +
+  scale_y_discrete(limits = rev(paste0("PAC", 1:8))) +
+  facet_wrap(
+    ~ AMR,
+    scales = "free",
+    ncol = 3,
+    labeller = labeller(AMR = gene_facet_bold_labeller)
+  ) +
+  scale_fill_manual(
+    values = detection_cols_combined,
+    limits = names(detection_cols_combined),
+    breaks = names(detection_cols_combined),
+    drop = FALSE
+  ) +
+  guides(
+    fill = guide_legend(
+      override.aes = list(
+        alpha = 1,
+        fill = unname(detection_cols_combined),
+        colour = "grey70"
+      )
+    )
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Cross-method detection of clinically relevant β-lactamase genes",
+    subtitle = "ARIBA-ResFinder vs ABRicate or AMRFinderPlus (nf-core/funcscan)",
+    x = "Follow-up week",
+    y = "Patient ID",
+    fill = "Detection"
+  ) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold", size = 16),
+    axis.text = element_text(size = 12, color = "black"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 13, hjust = 0.5),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    legend.position = "right",
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    legend.background = element_rect(fill = "white", colour = NA)
+  )
+
+plot_ariba_funcscan_combined
+
+ggsave(
+  file.path(plots_dir, "clinical_ARG_ARIBA_vs_funcscan.png"),
+  plot = plot_ariba_funcscan_combined,
+  width = 11,
+  height = 10,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+
+## Plot: ARIBA vs each funcscan tool
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=7, fig.height=4}
+# ---------------------------------------------------
+# 1) funcscan tools to compare.
+# ---------------------------------------------------
+
+funcscan_tools_for_comparison <- funcscan_tools_primary
+
+
+# ---------------------------------------------------
+# 2) Prepare ARIBA: detected hits only.
+# ---------------------------------------------------
+
+ariba_hits <- table_gather %>%
+  filter(!sample %in% c(
+    "Community-2",
+    "COMUNITY-1",
+    "CONTROL-DNA-2",
+    "DNA-CONTROL-1",
+    "Gut-1",
+    "Gut-microbiome-2"
+  )) %>%
+  filter(ariba == "Detected") %>%
+  mutate(
+    AMR_key = AMR,
+    AMR_key = str_replace_all(AMR_key, "-", "_"),
+    AMR_key = str_replace_all(AMR_key, " ", "_")
+  ) %>%
+  select(name, sample, follow_up_week, AMR_ariba = AMR, AMR_key) %>%
+  distinct()
+
+
+# ---------------------------------------------------
+# 3) Prepare funcscan: detected hits only, by tool.
+# ---------------------------------------------------
+
+funcscan_hits_by_tool <- funcscan_clinical_detection_by_tool %>%
+  filter(tool %in% funcscan_tools_for_comparison) %>%
+  mutate(
+    AMR_key = AMR,
+    AMR_key = str_replace_all(AMR_key, "-", "_"),
+    AMR_key = str_replace_all(AMR_key, " ", "_")
+  ) %>%
+  select(name, tool, AMR_funcscan = AMR, AMR_key) %>%
+  distinct()
+
+
+# ---------------------------------------------------
+# 4) Create the base table using only genes detected by each tool.
+# ---------------------------------------------------
+# This prevents assigning the same genes to every tool artificially.
+
+tool_specific_genes <- funcscan_hits_by_tool %>%
+  distinct(tool, AMR_key, AMR_funcscan)
+
+
+# ---------------------------------------------------
+# 5) Add sample and numeric visit identifiers to the combinations.
+# ---------------------------------------------------
+
+samples_for_plot <- table_gather %>%
+  filter(!sample %in% c(
+    "Community-2",
+    "COMUNITY-1",
+    "CONTROL-DNA-2",
+    "DNA-CONTROL-1",
+    "Gut-1",
+    "Gut-microbiome-2"
+  )) %>%
+  select(name, sample, patient_id, follow_up_week) %>%
+  distinct()
+
+
+comparison_by_tool <- samples_for_plot %>%
+  tidyr::crossing(tool_specific_genes) %>%
+  left_join(
+    ariba_hits %>%
+      mutate(ariba_detected = TRUE) %>%
+      select(name, AMR_key, ariba_detected),
+    by = c("name", "AMR_key")
+  ) %>%
+  left_join(
+    funcscan_hits_by_tool %>%
+      mutate(tool_detected = TRUE) %>%
+      select(name, tool, AMR_key, tool_detected),
+    by = c("name", "tool", "AMR_key")
+  ) %>%
+  mutate(
+    ariba_detected = replace_na(ariba_detected, FALSE),
+    tool_detected = replace_na(tool_detected, FALSE),
+    
+    detection_category = case_when(
+      ariba_detected & tool_detected ~ "ARIBA + funcscan",
+      ariba_detected & !tool_detected ~ "ARIBA only",
+      !ariba_detected & tool_detected ~ "Funcscan only",
+      TRUE ~ "Not detected"
+    ),
+    
+    detection_category = factor(
+      detection_category,
+      levels = c("ARIBA + funcscan", "ARIBA only", "Funcscan only", "Not detected")
+    ),
+    
+    patient_id = factor(patient_id, levels = paste0("PAC", 1:8)),
+    follow_up_week = as.integer(follow_up_week),
+    tool = factor(tool, levels = funcscan_tools_for_comparison)
+  )
+
+
+# ---------------------------------------------------
+# 6) Plot
+# ---------------------------------------------------
+detection_cols <- c(
+  "ARIBA + funcscan" = "#CC79A7",
+  "ARIBA only" = "#D55E00",
+  "Funcscan only" = "#56B4E9",
+  "Not detected" = "#E0E0E0"
+)
+
+legend_dummy <- tibble(
+  follow_up_week = 0L,
+  patient_id = factor("PAC1", levels = paste0("PAC", 1:8)),
+  detection_category = factor(
+    names(detection_cols),
+    levels = names(detection_cols)
+  )
+)
+
+plot_ariba_vs_each_funcscan_tool_specific <- ggplot(
+  comparison_by_tool,
+  aes(x = week_plot_labels(follow_up_week), y = patient_id, fill = detection_category)
+) +
+  geom_tile(color = "white") +
+  geom_tile(
+    data = legend_dummy,
+    aes(x = week_plot_labels(follow_up_week), y = patient_id, fill = detection_category),
+    inherit.aes = FALSE,
+    alpha = 0,
+    show.legend = TRUE
+  ) +
+  scale_y_discrete(limits = rev(paste0("PAC", 1:8))) +
+  facet_grid(
+    tool ~ AMR_funcscan,
+    scales = "free",
+    space = "free",
+    labeller = labeller(AMR_funcscan = gene_facet_labeller)
+  ) +
+  scale_fill_manual(
+    values = detection_cols,
+    limits = names(detection_cols),
+    breaks = names(detection_cols),
+    drop = FALSE
+  ) +
+  guides(
+    fill = guide_legend(
+      override.aes = list(
+        alpha = 1,
+        fill = unname(detection_cols),
+        colour = "grey70"
+      )
+    )
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Cross-method detection of ARGs",
+    subtitle = "ARIBA-ResFinder compared with tool-specific nf-core/funcscan detections",
+    x = "Follow-up week",
+    y = "Patient ID",
+    fill = "Detection"
+  ) +
+  theme(
+    strip.background = element_blank(),
+    strip.text.x = element_text(face = "bold", size = 11),
+    strip.text.y = element_text(face = "bold", size = 12, angle = 0),
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 13, hjust = 0.5),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    legend.position = "right"
+  )
+
+plot_ariba_vs_each_funcscan_tool_specific
+
+ggsave(
+  file.path(
+    plots_dir,
+    "ARIBA-vs-each-funcscan-tool-specific-ARGs.png"
+  ),
+  plot = plot_ariba_vs_each_funcscan_tool_specific,
+  width = 7,
+  height = 4,
+  dpi = 300
+)
+```
+
+# 4. Culturomics versus metagenomics
+```{r}
+collapse_genes <- function(x) {
+  x <- sort(unique(as.character(x)))
+  x <- x[!is.na(x) & x != ""]
+  if (length(x) == 0) "None" else paste(x, collapse = "; ")
+}
+
+normalise_arg_name_culture <- function(x) {
+  x %>%
+    str_trim() %>%
+    na_if("") %>%
+    na_if("-") %>%
+    na_if("nd") %>%
+    str_replace_all("[[:space:]]+", "") %>%
+    str_replace_all("-", "_")
+}
+
+culture_table <- culture_wgs_reference %>%
+  mutate(
+    culture_result = culture_species,
+    culture_ARG_status = case_when(
+      culture_ARGs_raw == "-" ~ "no_ARG_reported",
+      str_to_lower(culture_ARGs_raw) == "nd" ~ "unknown",
+      TRUE ~ "available"
+    ),
+    culture_expected_genes = map_chr(
+      str_split(culture_ARGs_raw, ";"),
+      ~ collapse_genes(normalise_arg_name_culture(.x))
+    )
+  ) %>%
+  select(
+    name, sample, follow_up_week, culture_result,
+    province, ST,
+    culture_ARGs_raw, culture_ARG_status, culture_expected_genes
+  )
+
+# Genes explicitly reported in cultured isolates. Values "-"
+# and "nd" are not treated as gene absence.
+culture_reported_genes <- culture_wgs_reference %>%
+  filter(
+    culture_ARGs_raw != "-",
+    str_to_lower(culture_ARGs_raw) != "nd"
+  ) %>%
+  separate_rows(culture_ARGs_raw, sep = ";") %>%
+  transmute(
+    name,
+    AMR = normalise_arg_name_culture(culture_ARGs_raw),
+    culture_gene_reported = TRUE
+  ) %>%
+  filter(!is.na(AMR)) %>%
+  distinct()
+
+# One row per sampled culture visit and selected clinically relevant gene.
+culture_clinical_ARG_status <- culture_table %>%
+  tidyr::crossing(AMR = clinical_genes) %>%
+  left_join(
+    culture_reported_genes,
+    by = c("name", "AMR")
+  ) %>%
+  add_patient_labels() %>%
+  mutate(
+    culture_gene_reported = replace_na(culture_gene_reported, FALSE),
+    culture_gene_status = case_when(
+      str_detect(culture_result, regex("^NEGATIVA$", ignore_case = TRUE)) ~
+        "Negative culture",
+      culture_ARG_status == "unknown" ~
+        "Not determined",
+      culture_gene_reported ~
+        "Reported",
+      TRUE ~
+        "Not reported"
+    ),
+    culture_gene_status = factor(
+      culture_gene_status,
+      levels = c(
+        "Reported",
+        "Not reported",
+        "Negative culture",
+        "Not determined"
+      )
+    )
+  )
+
+stopifnot(
+  nrow(culture_clinical_ARG_status) ==
+    nrow(culture_table) * length(clinical_genes),
+  !anyDuplicated(culture_clinical_ARG_status[c("name", "AMR")])
+)
+
+# write_csv(
+#   culture_clinical_ARG_status,
+#   file.path(tables_dir, "culture_clinical_ARG_status.csv")
+# )
+
+# Descriptive culture-metagenomics join. Concordance and discordance
+# categories are not assigned here.
+clinical_ARG_culture_metagenomics_by_method <-
+  culture_clinical_ARG_status %>%
+  select(
+    name,
+    sample,
+    patient_id,
+    follow_up_week,
+    culture_result,
+    culture_ARGs_raw,
+    AMR,
+    culture_gene_status
+  ) %>%
+  left_join(
+    clinical_ARG_detection_by_method %>%
+      select(
+        name,
+        AMR,
+        ariba_detected,
+        abricate_detected,
+        amrfinderplus_detected,
+        funcscan_detected,
+        detection_category,
+        ariba_resfinder_refs,
+        abricate_gene_symbols,
+        amrfinderplus_gene_symbols
+      ),
+    by = c("name", "AMR")
+  ) %>%
+  mutate(
+    metagenomic_detected = ariba_detected | funcscan_detected,
+    culture_metagenomics_interpretation = case_when(
+      culture_gene_status == "Reported" & metagenomic_detected ~
+        "Culture-reported ARG detected by metagenomics",
+      culture_gene_status == "Reported" & !metagenomic_detected ~
+        "Culture-reported ARG not detected by metagenomics",
+      culture_gene_status == "Not reported" & metagenomic_detected ~
+        "Metagenomic ARG not reported in culture metadata",
+      culture_gene_status == "Not reported" & !metagenomic_detected ~
+        "ARG neither reported nor detected",
+      culture_gene_status == "Negative culture" & metagenomic_detected ~
+        "Negative culture; metagenomic ARG detected",
+      culture_gene_status == "Negative culture" & !metagenomic_detected ~
+        "Negative culture; no metagenomic ARG detected",
+      culture_gene_status == "Not determined" ~
+        "Culture ARG not determined",
+      TRUE ~
+        "Check manually"
+    )
+  )
+
+stopifnot(
+  nrow(clinical_ARG_culture_metagenomics_by_method) ==
+    nrow(culture_clinical_ARG_status),
+  !anyNA(
+    clinical_ARG_culture_metagenomics_by_method$ariba_detected
+  ),
+  !anyNA(
+    clinical_ARG_culture_metagenomics_by_method$funcscan_detected
+  )
+)
+
+write_csv(
+  clinical_ARG_culture_metagenomics_by_method,
+  file.path(
+    tables_dir,
+    "clinical_ARG_culture_metagenomics_by_method.csv"
+  )
+)
+
+```
+
+## Clinically relevant taxa and ARGs
+
+This comparison addresses two separate questions:
+
+1. Whether the species isolated by culture is recovered in the taxonomic profile
+   of the corresponding metagenomic sample.
+2. Whether the ARGs reported for the isolate are detected by ARIBA or by the
+   main funcscan tools (ABRicate/AMRFinderPlus).
+
+Negative cultures and ARG results marked as `nd` are not interpreted as
+absence of taxa or genes, respectively.
+
+```{r culture-vs-metagenomics-summary}
+# Summarise the seven selected clinically relevant ARGs by visit. Compare only
+# the 13 sampled visits with culture metadata.
+culture_metagenomics_ARG_summary <-
+  clinical_ARG_culture_metagenomics_by_method %>%
+  group_by(name, patient_id, follow_up_week) %>%
+  summarise(
+    culture_reported_ARGs =
+      collapse_genes(AMR[culture_gene_status == "Reported"]),
+    metagenomic_detected_ARGs =
+      collapse_genes(AMR[metagenomic_detected]),
+    culture_ARGs_recovered =
+      collapse_genes(
+        AMR[culture_gene_status == "Reported" & metagenomic_detected]
+      ),
+    culture_ARGs_not_recovered =
+      collapse_genes(
+        AMR[culture_gene_status == "Reported" & !metagenomic_detected]
+      ),
+    additional_metagenomic_ARGs =
+      collapse_genes(
+        AMR[culture_gene_status == "Not reported" & metagenomic_detected]
+      ),
+    culture_ARG_information = case_when(
+      any(culture_gene_status == "Not determined") ~ "Not determined",
+      any(culture_gene_status == "Negative culture") ~ "Negative culture",
+      TRUE ~ "Available"
+    ),
+    .groups = "drop"
+  )
+
+# write_csv(
+#   culture_metagenomics_ARG_summary,
+#   file.path(tables_dir, "culture_vs_metagenomics_ARG_summary.csv")
+# )
+```
+
+```{r culture-vs-metagenomics-taxonomy}
+clinically_relevant_taxa_all <- read_csv(
+  file.path(
+    project_root,
+    "results",
+    "TAX-TAXPROFILER",
+    "R",
+    "clinically_relevant_taxa_all.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# Compare E. cloacae, E. hormaechei and P. mirabilis at species level.
+# The selected clinical taxonomic panel groups Enterobacter within the
+# E. cloacae complex and Proteus at genus level, so retrieve these rows
+# directly from the complete Kraken2/Bracken report.
+taxonomy_report_for_culture <- read_tsv(
+  file.path(
+    project_root,
+    "results",
+    "TAX-TAXPROFILER",
+    "bracken",
+    "table_import_braken_report.csv"
+  ),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    name = Sample %>%
+      str_remove("_pe_run1_db2\\.bracken\\.kraken2\\.report_bracken_species\\.txt$") %>%
+      normalise_sample_name()
+  )
+
+species_level_metagenomic_profile <- taxonomy_report_for_culture %>%
+  filter(
+    TaxRank == "S",
+    Name2 %in% c(
+      "Enterobacter cloacae",
+      "Enterobacter hormaechei",
+      "Proteus mirabilis"
+    )
+  ) %>%
+  transmute(
+    name,
+    metagenomic_taxon = Name2,
+    culture_taxon_reads = Reads
+  ) %>%
+  left_join(
+    taxonomy_report_for_culture %>%
+      filter(TaxRank == "D", Name2 == "Bacteria") %>%
+      transmute(name, total_bacterial_reads = Reads),
+    by = "name"
+  ) %>%
+  mutate(
+    culture_taxon_percent_total_bacteria =
+      100 * culture_taxon_reads / total_bacterial_reads
+  ) %>%
+  select(-total_bacterial_reads)
+
+culture_taxonomy_profiles <- bind_rows(
+  clinically_relevant_taxa_all %>%
+    transmute(
+      name,
+      metagenomic_taxon = clinically_relevant_taxon,
+      culture_taxon_reads = taxon_reads,
+      culture_taxon_percent_total_bacteria = taxon_percent_total_bacteria
+    ),
+  species_level_metagenomic_profile
+)
+
+# Explicit mapping between culture identifications and the
+# categories used in the metagenomic taxonomic profile.
+culture_taxon_key <- tribble(
+  ~culture_species,              ~metagenomic_taxon,
+  "Enterobacter cloacae",        "Enterobacter cloacae",
+  "Enterobacter hormaechei",     "Enterobacter hormaechei",
+  "Klebsiella pneumoniae",       "Klebsiella pneumoniae",
+  "Proteus mirabilis",           "Proteus mirabilis",
+  "Escherichia coli",            "Escherichia coli"
+)
+
+metagenomic_taxa_by_sample <- clinically_relevant_taxa_all %>%
+  filter(taxon_reads > 0) %>%
+  group_by(name) %>%
+  summarise(
+    metagenomic_detected_taxa =
+      collapse_genes(clinically_relevant_taxon),
+    metagenomic_dominant_taxon =
+      clinically_relevant_taxon[which.max(taxon_reads)],
+    dominant_taxon_percent_total_bacteria =
+      taxon_percent_total_bacteria[which.max(taxon_reads)],
+    .groups = "drop"
+  )
+
+culture_metagenomics_taxonomy <- culture_wgs_reference %>%
+  left_join(culture_taxon_key, by = "culture_species") %>%
+  left_join(metagenomic_taxa_by_sample, by = "name") %>%
+  left_join(
+    culture_taxonomy_profiles %>%
+      filter(culture_taxon_reads > 0),
+    by = c("name", "metagenomic_taxon")
+  ) %>%
+  mutate(
+    culture_taxon_status = case_when(
+      str_detect(culture_species, regex("^NEGATIVA$", ignore_case = TRUE)) ~
+        "Negative culture",
+      is.na(metagenomic_taxon) ~
+        "Taxon mapping not available",
+      !is.na(culture_taxon_reads) ~
+        "Culture species detected by metagenomics",
+      TRUE ~
+        "Culture species not detected by metagenomics"
+    )
+  ) %>%
+  arrange(patient_id, follow_up_week)
+
+stopifnot(
+  nrow(culture_metagenomics_taxonomy) == nrow(culture_wgs_reference),
+  !anyDuplicated(culture_metagenomics_taxonomy$name)
+)
+
+write_csv(
+  culture_metagenomics_taxonomy,
+  file.path(tables_dir, "culture_vs_metagenomics_taxonomy.csv")
+)
+
+# Final table with one row per visit, retaining the taxonomic
+# and ARG results separately.
+culture_vs_metagenomics_master <- culture_metagenomics_taxonomy %>%
+  left_join(
+    culture_metagenomics_ARG_summary,
+    by = c("name", "patient_id", "follow_up_week")
+  ) %>%
+  select(
+    patient_id,
+    follow_up_week,
+    name,
+    province,
+    culture_species,
+    ST,
+    culture_ARGs_raw,
+    metagenomic_taxon,
+    culture_taxon_status,
+    culture_taxon_reads,
+    culture_taxon_percent_total_bacteria,
+    metagenomic_dominant_taxon,
+    dominant_taxon_percent_total_bacteria,
+    culture_reported_ARGs,
+    metagenomic_detected_ARGs,
+    culture_ARGs_recovered,
+    culture_ARGs_not_recovered,
+    additional_metagenomic_ARGs,
+    culture_ARG_information
+  )
+
+# write_csv(
+#   culture_vs_metagenomics_master,
+#   file.path(tables_dir, "culture_vs_metagenomics_master.csv")
+# )
+```
+
+```{r culture-vs-metagenomics-heatmap, warning=FALSE, message=FALSE, fig.width=6, fig.height=3}
+sample_levels_culture <- culture_wgs_reference %>%
+  arrange(
+    readr::parse_number(patient_id),
+    follow_up_week
+  ) %>%
+  transmute(sample_label = paste(patient_id, week_plot_labels(follow_up_week), sep = "\n")) %>%
+  pull(sample_label)
+
+# The figure separates two dimensions:
+# 1) whether the taxon or ARG was reported by culture;
+# 2) whether that finding was recovered by metagenomics and by which method.
+# Complete the matrix to distinguish "not reported" from
+# "not determined" and from a culture finding not recovered by metagenomics.
+
+taxa_features_culture <- culture_metagenomics_taxonomy %>%
+  filter(culture_taxon_status != "Negative culture") %>%
+  distinct(culture_species) %>%
+  arrange(culture_species) %>%
+  pull(culture_species)
+
+taxa_heatmap <- culture_wgs_reference %>%
+  select(name, patient_id, follow_up_week) %>%
+  tidyr::crossing(feature = taxa_features_culture) %>%
+  left_join(
+    culture_metagenomics_taxonomy %>%
+      select(name, culture_species, culture_taxon_status),
+    by = "name"
+  ) %>%
+  mutate(
+    sample_label = paste(patient_id, week_plot_labels(follow_up_week), sep = "\n"),
+    feature_group = "Cultured taxon",
+    culture_status = if_else(
+      culture_taxon_status != "Negative culture" &
+        feature == culture_species,
+      "Reported by culture",
+      "Not reported by culture"
+    ),
+    metagenomic_status = case_when(
+      culture_status == "Reported by culture" &
+        culture_taxon_status == "Culture species detected by metagenomics" ~
+        "Recovered cultured taxon",
+      culture_status == "Reported by culture" ~
+        "Not recovered by metagenomics",
+      TRUE ~
+        "Not reported by culture"
+    ),
+    cell_label = case_when(
+      metagenomic_status == "Recovered cultured taxon" ~ "",
+      metagenomic_status == "Not recovered by metagenomics" ~ "",
+      TRUE ~ ""
+    )
+  )
+
+ARG_features_culture <- clinical_ARG_culture_metagenomics_by_method %>%
+  filter(culture_gene_status == "Reported") %>%
+  distinct(AMR) %>%
+  arrange(AMR) %>%
+  pull(AMR)
+
+ARG_heatmap <- clinical_ARG_culture_metagenomics_by_method %>%
+  filter(AMR %in% ARG_features_culture) %>%
+  transmute(
+    sample_label = paste(patient_id, week_plot_labels(follow_up_week), sep = "\n"),
+    feature_group = "Culture-reported ARG",
+    feature = AMR,
+    culture_status = case_when(
+      culture_gene_status == "Reported" ~ "Reported by culture",
+      culture_gene_status %in% c("Not determined", "Negative culture") ~
+        "Not determined",
+      TRUE ~ "Not reported by culture"
+    ),
+    metagenomic_status = case_when(
+      culture_status == "Not determined" ~ "Not determined",
+      culture_status == "Not reported by culture" ~
+        "Not reported by culture",
+      ariba_detected & funcscan_detected ~
+        "Recovered by ARIBA + funcscan",
+      ariba_detected ~
+        "Recovered by ARIBA only",
+      funcscan_detected ~
+        "Recovered by funcscan only",
+      TRUE ~
+        "Not recovered by metagenomics"
+    ),
+    cell_label = case_when(
+      culture_status == "Not determined" ~ "×",
+      metagenomic_status == "Recovered by ARIBA + funcscan" ~ "A+F",
+      metagenomic_status == "Recovered by ARIBA only" ~ "",
+      metagenomic_status == "Recovered by funcscan only" ~ "F",
+      metagenomic_status == "Not recovered by metagenomics" ~ "",
+      TRUE ~ ""
+    )
+  )
+
+culture_metagenomics_heatmap <- bind_rows(taxa_heatmap, ARG_heatmap) %>%
+  mutate(
+    sample_label = factor(sample_label, levels = sample_levels_culture),
+    # ggplot draws y-axis levels from bottom to top. Reverse the order here
+    # so that taxa and ARGs are displayed alphabetically from
+    # top to bottom within each panel.
+    feature = factor(
+      feature,
+      levels = rev(c(
+        sort(unique(taxa_heatmap$feature)),
+        sort(unique(ARG_heatmap$feature))
+      ))
+    ),
+    feature_group = factor(
+      feature_group,
+      levels = c("Cultured taxon", "Culture-reported ARG")
+    ),
+    culture_status = factor(
+      culture_status,
+      levels = c(
+        "Reported by culture",
+        "Not reported by culture",
+        "Not determined"
+      )
+    ),
+    metagenomic_status = factor(
+      metagenomic_status,
+      levels = c(
+        "Recovered cultured taxon",
+        "Recovered by ARIBA + funcscan",
+        "Recovered by ARIBA only",
+        "Recovered by funcscan only",
+        "Not recovered by metagenomics",
+        "Not reported by culture",
+        "Not determined"
+      )
+    )
+  )
+
+culture_metagenomics_colours <- c(
+  "Recovered cultured taxon" = "#117733",
+  "Recovered by ARIBA + funcscan" = "#CC79A7",
+  "Recovered by ARIBA only" = "#D55E00",
+  "Recovered by funcscan only" = "#56B4E9",
+  "Not recovered by metagenomics" = "#DDCC77",
+  "Not reported by culture" = "#D9D9D9",
+  "Not determined" = "white"
+)
+
+# Include recovery categories with no observations in the legend.
+metagenomic_status_legend_dummy <- tibble(
+  sample_label = factor(
+    sample_levels_culture[1],
+    levels = sample_levels_culture
+  ),
+  feature_group = factor(
+    "Culture-reported ARG",
+    levels = c("Cultured taxon", "Culture-reported ARG")
+  ),
+  feature = factor(
+    ARG_features_culture[1],
+    levels = levels(culture_metagenomics_heatmap$feature)
+  ),
+  metagenomic_status = factor(
+    c(
+      "Recovered cultured taxon",
+      "Recovered by ARIBA + funcscan",
+      "Recovered by ARIBA only",
+      "Recovered by funcscan only",
+      "Not recovered by metagenomics"
+    ),
+    levels = names(culture_metagenomics_colours)
+  )
+)
+
+# Use an invisible layer to create a separate second legend explaining
+# the black border, grey cell and crossed cell.
+culture_status_legend_dummy <- tibble(
+  sample_label = factor(
+    sample_levels_culture[1],
+    levels = sample_levels_culture
+  ),
+  feature_group = factor(
+    "Culture-reported ARG",
+    levels = c("Cultured taxon", "Culture-reported ARG")
+  ),
+  feature = factor(
+    ARG_features_culture[1],
+    levels = levels(culture_metagenomics_heatmap$feature)
+  ),
+  culture_status_legend = factor(
+    c(
+      "Reported by culture",
+      "Not reported by culture",
+      "Not determined"
+    ),
+    levels = c(
+      "Reported by culture",
+      "Not reported by culture",
+      "Not determined"
+    )
+  )
+)
+# Y-axis labels: italic bacterial names and ARGs in roman type.
+culture_metagenomics_y_labels <- function(x) {
+  label_expressions <- map_chr(x, function(label) {
+    if (label %in% taxa_features_culture) {
+      paste0("italic('", label, "')")
+    } else if (str_detect(label, "^bla")) {
+      gene_plotmath_strings(label)
+    } else {
+      paste0("'", label, "'")
+    }
+  })
+
+  parse(text = label_expressions)
+}
+
+plot_culture_vs_metagenomics <- ggplot(
+  culture_metagenomics_heatmap,
+  aes(x = sample_label, y = feature, fill = metagenomic_status)
+) +
+  # Draw the complete matrix with white separators first. Then overlay
+  # black outlines for findings reported by culture to prevent
+  # adjacent white cell borders from obscuring any sides.
+  geom_tile(colour = "white", linewidth = 0.7) +
+  geom_tile(
+    data = metagenomic_status_legend_dummy,
+    aes(
+      x = sample_label,
+      y = feature,
+      fill = metagenomic_status
+    ),
+    inherit.aes = FALSE,
+    alpha = 0,
+    colour = NA,
+    show.legend = c(fill = TRUE)
+  ) +
+  geom_tile(
+    data = culture_metagenomics_heatmap %>%
+      filter(culture_status == "Reported by culture"),
+    aes(x = sample_label, y = feature),
+    inherit.aes = FALSE,
+    fill = NA,
+    colour = "black",
+    linewidth = 1.05,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    data = culture_status_legend_dummy,
+    aes(
+      x = sample_label,
+      y = feature,
+      shape = culture_status_legend
+    ),
+    inherit.aes = FALSE,
+    alpha = 0,
+    show.legend = c(shape = TRUE, fill = FALSE)
+  ) +
+  geom_text(
+    aes(label = cell_label),
+    size = 3.3,
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  facet_grid(feature_group ~ ., scales = "free_y", space = "free_y") +
+  scale_y_discrete(labels = culture_metagenomics_y_labels) +
+  scale_fill_manual(
+    values = culture_metagenomics_colours,
+    limits = names(culture_metagenomics_colours),
+    breaks = c(
+      "Recovered cultured taxon",
+      "Recovered by ARIBA + funcscan",
+      "Recovered by ARIBA only",
+      "Recovered by funcscan only",
+      "Not recovered by metagenomics"
+    ),
+    drop = FALSE
+  ) +
+  scale_shape_manual(
+    values = c(
+      "Reported by culture" = 22,
+      "Not reported by culture" = 22,
+      "Not determined" = 4
+    ),
+    drop = FALSE
+  ) +
+  guides(
+    fill = guide_legend(
+      order = 1,
+      title.position = "top",
+      nrow = 2,
+      byrow = TRUE,
+      override.aes = list(
+        fill = unname(culture_metagenomics_colours[c(
+          "Recovered cultured taxon",
+          "Recovered by ARIBA + funcscan",
+          "Recovered by ARIBA only",
+          "Recovered by funcscan only",
+          "Not recovered by metagenomics"
+        )]),
+        colour = "grey70",
+        alpha = 1
+      )
+    ),
+    shape = guide_legend(
+      order = 2,
+      title.position = "top",
+      nrow = 1,
+      override.aes = list(
+        shape = c(22, 22, 4),
+        fill = c("white", "#D9D9D9", NA),
+        colour = c("black", "#D9D9D9", "black"),
+        alpha = 1,
+        size = 4.5,
+        stroke = 1.1
+      )
+    )
+  ) +
+  labs(
+    title = "Recovery of culture results by metagenomics",
+    subtitle = paste(
+      "Taxon recovery: Kraken2/Bracken;",
+      "ARG recovery: ARIBA-ResFinder or",
+      "ABRicate/AMRFinderPlus (nf-core/funcscan)"
+    ),
+    x = "Patient and visit",
+    y = NULL,
+    fill = "Metagenomic recovery",
+    shape = "Culture-based status"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid = element_blank(),
+    strip.background = element_rect(fill = "#E9EEF5", color = NA),
+    strip.text.y = element_text(face = "bold", angle = 90),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_text(face = "bold", hjust = 0.5),
+    legend.box = "vertical",
+    legend.box.just = "center"
+  )
+
+plot_culture_vs_metagenomics
+
+# ggsave(
+#   file.path(plots_dir, "culture_vs_metagenomics_taxa_ARGs_heatmap.png"),
+#   plot = plot_culture_vs_metagenomics,
+#   width = 10,
+#   height = 6,
+#   dpi = 300,
+#   bg = "white"
+# )
+```
+
+# 5. Metagenomics versus culturomics
+
+## Reverse comparison: beta-lactamases detected by metagenomics but not reported by culture
+
+The panel includes KPC, TEM, SHV, CTX-M and GES (class A); VIM, IMP and
+NDM (class B); AmpC (class C); and the OXA-48, OXA-181, OXA-232,
+OXA-244, OXA-245, OXA-162, OXA-204, OXA-370 and OXA-484 variants (class D).
+Variants are retained in the cell labels. Visits with culture-derived ARG results
+marked as `nd` are excluded because absence of the gene from the isolate cannot
+be established.
+
+```{r metagenomics-not-culture-beta-lactamases, warning=FALSE, message=FALSE, fig.width=7, fig.height=4}
+oxa_variants_for_inverse_comparison <- c(
+  "48", "181", "232", "244", "245", "162", "204", "370", "484"
+)
+
+oxa_pattern_for_inverse_comparison <- paste0(
+  "OXA[-_ ]?(",
+  paste(oxa_variants_for_inverse_comparison, collapse = "|"),
+  ")([^0-9]|$)"
+)
+
+classify_beta_lactamase_family <- function(x) {
+  x_upper <- str_to_upper(replace_na(as.character(x), ""))
+
+  case_when(
+    str_detect(x_upper, "CTX[-_ ]?M") ~ "CTX-M",
+    str_detect(x_upper, "KPC") ~ "KPC",
+    str_detect(x_upper, "TEM") ~ "TEM",
+    str_detect(x_upper, "SHV") ~ "SHV",
+    str_detect(x_upper, "GES") ~ "GES",
+    str_detect(x_upper, "VIM") ~ "VIM",
+    str_detect(x_upper, "IMP") ~ "IMP",
+    str_detect(x_upper, "NDM") ~ "NDM",
+    str_detect(x_upper, "AMPC") ~ "AmpC",
+    str_detect(x_upper, oxa_pattern_for_inverse_comparison) ~ "OXA",
+    TRUE ~ NA_character_
+  )
+}
+
+beta_lactamase_class <- function(family) {
+  case_when(
+    family %in% c("KPC", "TEM", "SHV", "CTX-M", "GES") ~ "Class A",
+    family %in% c("VIM", "IMP", "NDM") ~ "Class B",
+    family == "AmpC" ~ "Class C",
+    family == "OXA" ~ "Class D",
+    TRUE ~ NA_character_
+  )
+}
+
+canonical_beta_lactamase_variant <- function(x, family) {
+  variant <- x %>%
+    as.character() %>%
+    str_remove(regex("^bla", ignore_case = TRUE)) %>%
+    str_replace_all("_", "-") %>%
+    str_replace_all("[[:space:]]+", "-") %>%
+    str_replace_all("-+", "-") %>%
+    str_to_upper()
+
+  if_else(
+    family == "AmpC",
+    str_replace(variant, "^AMPC", "AmpC"),
+    paste0("bla", variant)
+  )
+}
+
+beta_lactamase_family_levels <- c(
+  "KPC", "TEM", "SHV", "CTX-M", "GES",
+  "VIM", "IMP", "NDM",
+  "AmpC",
+  "OXA"
+)
+
+sample_levels_inverse <- culture_wgs_reference %>%
+  arrange(
+    readr::parse_number(patient_id),
+    follow_up_week
+  ) %>%
+  transmute(sample_label = paste(patient_id, week_plot_labels(follow_up_week), sep = "\n")) %>%
+  pull(sample_label)
+
+# funcscan: use only the two main tools, without requiring ARO annotations.
+funcscan_lab_beta_hits <- funcscan_hits_all %>%
+  filter(tool %in% c("ABRicate", "AMRFinderPlus")) %>%
+  mutate(
+    beta_lactamase_family =
+      classify_beta_lactamase_family(gene_symbol_original),
+    variant = canonical_beta_lactamase_variant(
+      gene_symbol_original,
+      beta_lactamase_family
+    )
+  ) %>%
+  filter(!is.na(beta_lactamase_family)) %>%
+  semi_join(
+    clinical_sample_visits %>% select(name),
+    by = "name"
+  ) %>%
+  distinct(name, beta_lactamase_family, variant, tool)
+
+ariba_lab_beta_hits <- ariba_hits_all %>%
+  mutate(
+    native_variant = AMR,
+    beta_lactamase_family =
+      classify_beta_lactamase_family(native_variant),
+    variant = canonical_beta_lactamase_variant(
+      native_variant,
+      beta_lactamase_family
+    )
+  ) %>%
+  filter(!is.na(beta_lactamase_family)) %>%
+  semi_join(
+    clinical_sample_visits %>% select(name),
+    by = "name"
+  ) %>%
+  distinct(name, beta_lactamase_family, variant)
+
+# Presence by family and method.
+metagenomic_beta_family_detection <- full_join(
+  ariba_lab_beta_hits %>%
+    distinct(name, beta_lactamase_family) %>%
+    mutate(ariba_detected = TRUE),
+  funcscan_lab_beta_hits %>%
+    distinct(name, beta_lactamase_family) %>%
+    mutate(funcscan_detected = TRUE),
+  by = c("name", "beta_lactamase_family")
+) %>%
+  mutate(
+    ariba_detected = replace_na(ariba_detected, FALSE),
+    funcscan_detected = replace_na(funcscan_detected, FALSE)
+  )
+
+# Standardise equivalent names reported by different tools.
+# Omit the generic family call when a specific variant is available.
+metagenomic_beta_variants <- bind_rows(
+  ariba_lab_beta_hits %>%
+    select(name, beta_lactamase_family, variant),
+  funcscan_lab_beta_hits %>%
+    select(name, beta_lactamase_family, variant)
+) %>%
+  distinct() %>%
+  group_by(name, beta_lactamase_family) %>%
+  mutate(
+    generic_variant = paste0("bla", str_to_upper(beta_lactamase_family)),
+    has_specific_variant = any(
+      variant != generic_variant |
+        beta_lactamase_family %in% c("AmpC", "OXA")
+    )
+  ) %>%
+  filter(
+    !has_specific_variant |
+      variant != generic_variant |
+      beta_lactamase_family %in% c("AmpC", "OXA")
+  ) %>%
+  summarise(
+    metagenomic_variants =
+      paste(sort(unique(variant)), collapse = "; "),
+    .groups = "drop"
+  )
+
+# Families explicitly reported in the culture metadata.
+culture_reported_beta_families <- culture_wgs_reference %>%
+  filter(
+    culture_ARGs_raw != "-",
+    str_to_lower(culture_ARGs_raw) != "nd"
+  ) %>%
+  separate_rows(culture_ARGs_raw, sep = ";") %>%
+  transmute(
+    name,
+    beta_lactamase_family =
+      classify_beta_lactamase_family(culture_ARGs_raw),
+    culture_reported = TRUE
+  ) %>%
+  filter(!is.na(beta_lactamase_family)) %>%
+  distinct()
+
+metagenomics_not_culture_beta_lactamases <-
+  metagenomic_beta_family_detection %>%
+  left_join(
+    metagenomic_beta_variants,
+    by = c("name", "beta_lactamase_family")
+  ) %>%
+  left_join(
+    culture_wgs_reference %>%
+      select(
+        name,
+        patient_id,
+        follow_up_week,
+        culture_species,
+        culture_ARGs_raw
+      ),
+    by = "name"
+  ) %>%
+  # nd indicates that the culture-derived ARG profile was not determined.
+  filter(str_to_lower(culture_ARGs_raw) != "nd") %>%
+  left_join(
+    culture_reported_beta_families,
+    by = c("name", "beta_lactamase_family")
+  ) %>%
+  mutate(
+    culture_reported = replace_na(culture_reported, FALSE),
+    detection_source = case_when(
+      ariba_detected & funcscan_detected ~ "ARIBA + funcscan",
+      ariba_detected ~ "ARIBA only",
+      funcscan_detected ~ "Funcscan only"
+    ),
+    beta_lactamase_class =
+      beta_lactamase_class(beta_lactamase_family)
+  ) %>%
+  filter(!culture_reported) %>%
+  arrange(
+    patient_id,
+    follow_up_week,
+    match(beta_lactamase_family, beta_lactamase_family_levels)
+  )
+
+write_csv(
+  metagenomics_not_culture_beta_lactamases,
+  file.path(
+    tables_dir,
+    "metagenomics_not_culture_beta_lactamases.csv"
+  )
+)
+
+eligible_culture_samples_inverse <- culture_wgs_reference %>%
+  filter(str_to_lower(culture_ARGs_raw) != "nd") %>%
+  select(name, patient_id, follow_up_week)
+
+metagenomics_not_culture_plot_data <-
+  eligible_culture_samples_inverse %>%
+  tidyr::crossing(
+    beta_lactamase_family = beta_lactamase_family_levels
+  ) %>%
+  left_join(
+    metagenomics_not_culture_beta_lactamases %>%
+      select(
+        name,
+        beta_lactamase_family,
+        metagenomic_variants,
+        detection_source
+      ),
+    by = c("name", "beta_lactamase_family")
+  ) %>%
+  mutate(
+    sample_label = factor(
+      paste(patient_id, week_plot_labels(follow_up_week), sep = "\n"),
+      levels = sample_levels_inverse
+    ),
+    beta_lactamase_family = factor(
+      beta_lactamase_family,
+      levels = rev(beta_lactamase_family_levels)
+    ),
+    beta_lactamase_class = factor(
+      beta_lactamase_class(beta_lactamase_family),
+      levels = c("Class A", "Class B", "Class C", "Class D")
+    ),
+    detection_source = replace_na(
+      detection_source,
+      "No additional metagenomic detection"
+    ),
+    detection_source = factor(
+      detection_source,
+      levels = c(
+        "ARIBA + funcscan",
+        "ARIBA only",
+        "Funcscan only",
+        "No additional metagenomic detection"
+      )
+    ),
+    cell_label = gene_cell_plotmath_strings(metagenomic_variants)
+  )
+
+metagenomics_not_culture_colours <- c(
+  "ARIBA + funcscan" = "#CC79A7",
+  "ARIBA only" = "#D55E00",
+  "Funcscan only" = "#56B4E9",
+  "No additional metagenomic detection" = "#E0E0E0"
+)
+
+# One label per gene prevents atop() from shrinking text in cells
+# with multiple variants. Centre each group within its cell.
+metagenomics_not_culture_gene_labels <-
+  metagenomics_not_culture_plot_data %>%
+  filter(!is.na(metagenomic_variants), metagenomic_variants != "") %>%
+  separate_rows(metagenomic_variants, sep = ";\\s*") %>%
+  group_by(sample_label, beta_lactamase_family, beta_lactamase_class) %>%
+  mutate(
+    cell_label = gene_bold_plotmath_strings(metagenomic_variants),
+    label_offset = ( (n() + 1) / 2 - row_number() ) * 0.28
+  ) %>%
+  ungroup()
+
+plot_metagenomics_not_culture_beta_lactamases <- ggplot(
+  metagenomics_not_culture_plot_data,
+  aes(
+    x = sample_label,
+    y = beta_lactamase_family,
+    fill = detection_source
+  )
+) +
+  geom_tile(color = "white", linewidth = 0.7) +
+  geom_text(
+    data = metagenomics_not_culture_gene_labels,
+    aes(label = cell_label),
+    position = position_nudge(y = metagenomics_not_culture_gene_labels$label_offset),
+    size = 5.0,
+    lineheight = 0.9,
+    fontface = "bold",
+    parse = TRUE
+  ) +
+  facet_grid(
+    beta_lactamase_class ~ .,
+    scales = "free_y",
+    space = "free_y",
+    drop = FALSE
+  ) +
+  scale_fill_manual(
+    values = metagenomics_not_culture_colours,
+    limits = names(metagenomics_not_culture_colours),
+    breaks = names(metagenomics_not_culture_colours),
+    labels = c(
+      "ARIBA + funcscan" = "ARG detected by ARIBA + funcscan",
+      "ARIBA only" = "ARG detected by ARIBA only",
+      "Funcscan only" = "ARG detected by funcscan only",
+      "No additional metagenomic detection" = "No additional ARG detected"
+    ),
+    drop = FALSE
+  ) +
+  guides(fill = guide_legend(nrow = 1, byrow = TRUE, title.position = "top")) +
+  labs(
+    title = "Beta-lactamases detected by metagenomics
+but not reported by culturomics",
+    subtitle = paste(
+      "Variants detected by ARIBA-ResFinder and/or
+",
+      "ABRicate/AMRFinderPlus"
+    ),
+    x = "Patient and visit",
+    y = "Beta-lactamase family",
+    fill = "Metagenomic result"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    panel.grid = element_blank(),
+    strip.background = element_rect(fill = "#E9EEF5", color = NA),
+    strip.text.y = element_text(
+      face = "bold",
+      angle = 90,
+      size = 14,
+      color = "black"
+    ),
+    axis.text.x = element_text(color = "black", size = 18),
+    axis.text.y = element_text(color = "black", size = 18),
+    axis.title = element_text(face = "bold", size = 19),
+    plot.title = element_text(face = "bold", size = 26, hjust = 0.5),
+    plot.subtitle = element_text(size = 21, hjust = 0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_text(face = "bold", size = 18),
+    legend.key.width = grid::unit(0.35, "cm"),
+    legend.spacing.x = grid::unit(0, "cm"),
+    legend.text = element_text(size = 14)
+  )
+
+plot_metagenomics_not_culture_beta_lactamases
+
+ggsave(
+  file.path(
+    plots_dir,
+    "metagenomics_not_culture_beta_lactamases.png"
+  ),
+  plot = plot_metagenomics_not_culture_beta_lactamases,
+  width = 15,
+  height = 10,
+  dpi = 300,
+  bg = "white"
+)
+
+```
+
+# 6. Taxonomic context of selected clinically relevant ARGs on contigs
+```{r clinical-arg-taxonomic-context}
+rank_priority <- c(
+  "species" = 8,
+  "genus" = 7,
+  "family" = 6,
+  "order" = 5,
+  "class" = 4,
+  "phylum" = 3,
+  "superkingdom" = 2,
+  "no rank" = 1
+)
+
+# One row per ARG hit before adding taxonomy. Include only the
+# two main tools and the seven selected clinically relevant genes.
+arg_hits <- funcscan_clinical_hits_long %>%
+  filter(!is.na(contig_id), contig_id != "") %>%
+  select(
+    name,
+    contig_id,
+    ARG = AMR,
+    tool,
+    gene_symbol = gene_symbol_original,
+    reference_database_name,
+    reference_database_version,
+    reference_accession,
+    coverage_percentage,
+    sequence_identity
+  ) %>%
+  distinct()
+
+# Join taxonomy by sample and contig. If MMseqs2 provides multiple
+# assignments at the most specific available rank, retain all of them.
+contig_taxonomy <- funcscan_arg %>%
+  transmute(
+    name = normalise_sample_name(sample_id_taxa),
+    contig_id = contig_id_taxa,
+    taxid,
+    rank_label,
+    scientific_name,
+    mmseqs_lineage_contig
+  ) %>%
+  filter(!name %in% controls_list) %>%
+  filter(!is.na(name), !is.na(contig_id)) %>%
+  filter(!is.na(scientific_name)) %>%
+  filter(scientific_name != "unclassified") %>%
+  semi_join(
+    clinical_sample_visits %>% select(name),
+    by = "name"
+  ) %>%
+  distinct() %>%
+  mutate(
+    rank_score = recode(rank_label, !!!rank_priority, .default = 0)
+  ) %>%
+  group_by(name, contig_id) %>%
+  filter(rank_score == max(rank_score, na.rm = TRUE)) %>%
+  summarise(
+    best_taxonomic_assignment = paste(
+      sort(unique(scientific_name)),
+      collapse = "; "
+    ),
+    best_taxonomic_rank = paste(
+      sort(unique(rank_label)),
+      collapse = "; "
+    ),
+    mmseqs_lineage_contig = paste(
+      sort(unique(mmseqs_lineage_contig[!is.na(mmseqs_lineage_contig)])),
+      collapse = " | "
+    ),
+    .groups = "drop"
+  )
+
+clinical_arg_taxonomic_context <- arg_hits %>%
+  left_join(
+    contig_taxonomy,
+    by = c("name", "contig_id")
+  ) %>%
+  left_join(
+    clinical_sample_visits %>%
+      select(name, sample, patient_id, follow_up_week),
+    by = "name"
+  ) %>%
+  mutate(
+    best_taxonomic_assignment = replace_na(
+      best_taxonomic_assignment,
+      "No taxonomic assignment"
+    ),
+    best_taxonomic_rank = replace_na(
+      best_taxonomic_rank,
+      "No assignment"
+    ),
+    mmseqs_lineage_contig = replace_na(
+      mmseqs_lineage_contig,
+      "No lineage"
+    )
+  ) %>%
+  arrange(patient_id, follow_up_week, ARG, contig_id, tool)
+
+clinical_arg_taxonomic_context_summary <- clinical_arg_taxonomic_context %>%
+  group_by(
+    name, sample, patient_id, follow_up_week, ARG
+  ) %>%
+  summarise(
+    tools_detecting_ARG = paste(sort(unique(tool)), collapse = "; "),
+    n_tools = n_distinct(tool),
+    n_ARG_contigs = n_distinct(contig_id),
+    ARG_contigs = paste(sort(unique(contig_id)), collapse = "; "),
+    taxonomic_context = paste(
+      sort(unique(best_taxonomic_assignment)),
+      collapse = "; "
+    ),
+    taxonomic_rank = paste(
+      sort(unique(best_taxonomic_rank)),
+      collapse = "; "
+    ),
+    lineage = paste(
+      sort(unique(mmseqs_lineage_contig)),
+      collapse = " | "
+    ),
+    min_coverage_percentage = min(coverage_percentage, na.rm = TRUE),
+    max_sequence_identity = max(sequence_identity, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(patient_id, follow_up_week, ARG)
+
+write_csv(
+  clinical_arg_taxonomic_context,
+  file.path(tables_dir, "clinical_ARG_taxonomic_context.csv")
+)
+
+write_csv(
+  clinical_arg_taxonomic_context_summary,
+  file.path(tables_dir, "clinical_ARG_taxonomic_context_summary.csv")
+)
+
+clinical_arg_taxonomic_context_summary
+```
+
+## Plot: culture results and contig taxonomy of ARGs detected by funcscan
+
+The upper panel shows metagenomic recovery of the cultured species.
+In the lower panel, ARGs detected by ABRicate or AMRFinderPlus are annotated
+with the best available taxonomic assignment of their contig. ARIBA-only
+detections are retained without contig taxonomy.
+
+```{r culture-vs-funcscan-taxonomy-plot, warning=FALSE, message=FALSE, fig.width=8, fig.height=4}
+taxonomic_code_key <- c(
+  "Enterobacteriaceae" = "F-Ent",
+  "Enterobacterales" = "O-Ent",
+  "Gammaproteobacteria" = "C-Gam",
+  "Shewanella" = "G-She",
+  "Pseudomonas E putida E" = "S-Ppu"
+)
+
+taxonomic_context_to_code <- function(x) {
+  map_chr(x, function(value) {
+    if (is.na(value) || value == "") {
+      return("?")
+    }
+
+    taxa <- str_split(value, ";\\s*")[[1]]
+    codes <- unname(taxonomic_code_key[taxa])
+    codes[is.na(codes)] <- "?"
+    paste(unique(codes), collapse = "+")
+  })
+}
+
+funcscan_ARG_taxonomy_heatmap <- 
+  clinical_ARG_culture_metagenomics_by_method %>%
+  filter(AMR %in% ARG_features_culture) %>%
+  select(
+    name,
+    patient_id,
+    follow_up_week,
+    ARG = AMR,
+    culture_gene_status,
+    ariba_detected,
+    funcscan_detected
+  ) %>%
+  left_join(
+    clinical_arg_taxonomic_context_summary %>%
+      select(
+        name,
+        ARG,
+        ARG_contigs,
+        taxonomic_context,
+        taxonomic_rank
+      ),
+    by = c("name", "ARG")
+  ) %>%
+  transmute(
+    sample_label = paste(patient_id, week_plot_labels(follow_up_week), sep = "\n"),
+    feature_group = "Culture-reported ARG",
+    feature = ARG,
+    culture_status = case_when(
+      culture_gene_status == "Reported" ~ "Reported by culture",
+      culture_gene_status %in% c("Not determined", "Negative culture") ~
+        "Not determined",
+      TRUE ~ "Not reported by culture"
+    ),
+    status = case_when(
+      culture_status == "Not determined" ~ "Not determined",
+      culture_status == "Not reported by culture" ~
+        "Not reported by culture",
+      funcscan_detected & ariba_detected ~ "ARG recovered by ARIBA + funcscan",
+      funcscan_detected ~ "ARG recovered by funcscan only",
+      ariba_detected ~ "ARG recovered by ARIBA only",
+      TRUE ~ "ARG not recovered by metagenomics"
+    ),
+    cell_label = case_when(
+      culture_status == "Not determined" ~ "×",
+      culture_status == "Not reported by culture" ~ "",
+      !funcscan_detected & ariba_detected ~ "",
+      !funcscan_detected ~ "",
+      is.na(taxonomic_context) ~ "?",
+      TRUE ~ paste0(
+        taxonomic_context_to_code(taxonomic_context),
+        "\n",
+        ARG_contigs
+      )
+    )
+  )
+
+culture_funcscan_taxonomy_heatmap <- bind_rows(
+  taxa_heatmap %>%
+    transmute(
+      sample_label,
+      feature_group,
+      feature,
+      culture_status,
+      status = case_when(
+        culture_status == "Not reported by culture" ~
+          "Not reported by culture",
+        metagenomic_status == "Recovered cultured taxon" ~
+          "Recovered cultured taxon",
+        TRUE ~ "ARG not recovered by metagenomics"
+      ),
+      cell_label
+    ),
+  funcscan_ARG_taxonomy_heatmap
+) %>%
+  mutate(
+    sample_label = factor(sample_label, levels = sample_levels_culture),
+    feature = factor(
+      feature,
+      levels = rev(c(
+        sort(unique(taxa_heatmap$feature)),
+        sort(unique(funcscan_ARG_taxonomy_heatmap$feature))
+      ))
+    ),
+    feature_group = factor(
+      feature_group,
+      levels = c("Cultured taxon", "Culture-reported ARG")
+    ),
+    culture_status = factor(
+      culture_status,
+      levels = c(
+        "Reported by culture",
+        "Not reported by culture",
+        "Not determined"
+      )
+    ),
+    status = factor(
+      status,
+      levels = c(
+        "Recovered cultured taxon",
+        "ARG recovered by ARIBA + funcscan",
+      "ARG recovered by funcscan only",
+        "ARG recovered by ARIBA only",
+        "ARG not recovered by metagenomics",
+        "Not reported by culture",
+        "Not determined"
+      )
+    )
+  )
+
+culture_funcscan_taxonomy_colours <- c(
+  "Recovered cultured taxon" = "#117733",
+  "ARG recovered by ARIBA + funcscan" = "#CC79A7",
+  "ARG recovered by funcscan only" = "#56B4E9",
+  "ARG recovered by ARIBA only" = "#D55E00",
+  "ARG not recovered by metagenomics" = "#DDCC77",
+  "Not reported by culture" = "#D9D9D9",
+  "Not determined" = "white"
+)
+
+# Invisible rows keep both legends complete and separate.
+funcscan_taxonomy_status_legend_dummy <- tibble(
+  sample_label = factor(sample_levels_culture[1], levels = sample_levels_culture),
+  feature_group = factor(
+    "Culture-reported ARG",
+    levels = c("Cultured taxon", "Culture-reported ARG")
+  ),
+  feature = factor(
+    ARG_features_culture[1],
+    levels = levels(culture_funcscan_taxonomy_heatmap$feature)
+  ),
+  status = factor(
+    c(
+      "Recovered cultured taxon",
+      "ARG recovered by ARIBA + funcscan",
+      "ARG recovered by funcscan only",
+      "ARG recovered by ARIBA only",
+      "ARG not recovered by metagenomics"
+    ),
+    levels = names(culture_funcscan_taxonomy_colours)
+  )
+)
+
+funcscan_taxonomy_culture_legend_dummy <- tibble(
+  sample_label = factor(sample_levels_culture[1], levels = sample_levels_culture),
+  feature_group = factor(
+    "Culture-reported ARG",
+    levels = c("Cultured taxon", "Culture-reported ARG")
+  ),
+  feature = factor(
+    ARG_features_culture[1],
+    levels = levels(culture_funcscan_taxonomy_heatmap$feature)
+  ),
+  culture_status_legend = factor(
+    c(
+      "Reported by culture",
+      "Not reported by culture",
+      "Not determined"
+    ),
+    levels = c(
+      "Reported by culture",
+      "Not reported by culture",
+      "Not determined"
+    )
+  )
+)
+
+plot_culture_vs_funcscan_taxonomy <- ggplot(
+  culture_funcscan_taxonomy_heatmap,
+  aes(x = sample_label, y = feature, fill = status)
+) +
+  # Draw the complete matrix first, then overlay black borders so that
+  # adjacent cells do not obscure any sides.
+  geom_tile(color = "white", linewidth = 0.7) +
+  geom_tile(
+    data = funcscan_taxonomy_status_legend_dummy,
+    aes(x = sample_label, y = feature, fill = status),
+    inherit.aes = FALSE,
+    alpha = 0,
+    colour = NA,
+    show.legend = c(fill = TRUE)
+  ) +
+  geom_tile(
+    data = culture_funcscan_taxonomy_heatmap %>%
+      filter(culture_status == "Reported by culture"),
+    aes(x = sample_label, y = feature),
+    inherit.aes = FALSE,
+    fill = NA,
+    colour = "black",
+    linewidth = 1.05,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    data = funcscan_taxonomy_culture_legend_dummy,
+    aes(x = sample_label, y = feature, shape = culture_status_legend),
+    inherit.aes = FALSE,
+    alpha = 0,
+    show.legend = c(shape = TRUE, fill = FALSE)
+  ) +
+  geom_text(
+    aes(label = cell_label),
+    size = 2.65,
+    lineheight = 0.85,
+    fontface = "bold"
+  ) +
+  facet_grid(feature_group ~ ., scales = "free_y", space = "free_y") +
+  scale_y_discrete(labels = culture_metagenomics_y_labels) +
+  scale_fill_manual(
+    values = culture_funcscan_taxonomy_colours,
+    limits = names(culture_funcscan_taxonomy_colours),
+    breaks = c(
+      "Recovered cultured taxon",
+      "ARG recovered by ARIBA + funcscan",
+      "ARG recovered by funcscan only",
+      "ARG recovered by ARIBA only",
+      "ARG not recovered by metagenomics"
+    ),
+    drop = FALSE
+  ) +
+  scale_shape_manual(
+    values = c(
+      "Reported by culture" = 22,
+      "Not reported by culture" = 22,
+      "Not determined" = 4
+    ),
+    drop = FALSE
+  ) +
+  guides(
+    fill = guide_legend(
+      order = 1,
+      title.position = "top",
+      nrow = 1,
+      byrow = TRUE,
+      override.aes = list(
+        fill = unname(culture_funcscan_taxonomy_colours[c(
+          "Recovered cultured taxon",
+          "ARG recovered by ARIBA + funcscan",
+      "ARG recovered by funcscan only",
+          "ARG recovered by ARIBA only",
+          "ARG not recovered by metagenomics"
+        )]),
+        colour = "grey70",
+        alpha = 1
+      )
+    ),
+    shape = guide_legend(
+      order = 2,
+      title.position = "top",
+      nrow = 1,
+      override.aes = list(
+        shape = c(22, 22, 4),
+        fill = c("white", "#D9D9D9", NA),
+        colour = c("black", "#D9D9D9", "black"),
+        alpha = 1,
+        size = 4.5,
+        stroke = 1.1
+      )
+    )
+  ) +
+  labs(
+    title = "Culture results and taxonomic context of ARG contigs",
+    subtitle = paste(
+      "Contig taxonomy from ABRicate/AMRFinderPlus;",
+      "ARIBA-only detections retained without taxonomy"
+    ),
+    x = "Patient and visit",
+    y = NULL,
+    fill = "Metagenomic result",
+    shape = "Culture-based status",
+    caption = paste(
+      "Taxonomic codes: F-Ent = Enterobacteriaceae (family);",
+      "O-Ent = Enterobacterales (order);",
+      "C-Gam = Gammaproteobacteria (class);",
+      "\nG-She = Shewanella (genus);",
+      "S-Ppu = Pseudomonas E putida E (species)."
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    panel.grid = element_blank(),
+    strip.background = element_rect(fill = "#E9EEF5", color = NA),
+    strip.text.y = element_text(face = "bold", angle = 90, size = 12),
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.text.y = element_text(color = "black", size = 11),
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.box.just = "center",
+    legend.justification = "center",
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.title = element_text(face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 9, hjust = 0.5)
+  )
+
+plot_culture_vs_funcscan_taxonomy
+
+ggsave(
+  file.path(plots_dir, "culture_vs_funcscan_ARG_contig_taxonomy.png"),
+  plot = plot_culture_vs_funcscan_taxonomy,
+  width = 13,
+  height = 7.5,
+  dpi = 300,
+  bg = "white"
+)
+```

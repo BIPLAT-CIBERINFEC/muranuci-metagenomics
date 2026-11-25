@@ -1,0 +1,678 @@
+---
+title: "Controls"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load Libraries
+```{r LOAD LIBRARIES, include=FALSE}
+# Load the packages required for the analysis.
+library(dplyr)
+library(tidyverse)
+library(WriteXLS)
+
+# library(ggsci)
+# library(scales)
+# library(cowplot)
+# library(RColorBrewer)
+# library(viridis)
+# library(ggrepel)
+# 
+# getwd()
+source("../TAX-TAXPROFILER/R/import_kraken.R")
+# source("./functions_taxonomy_plots.R")
+```
+
+
+```{r}
+control_samples <- tribble(
+  ~Sample,             ~control_type, ~replicate, ~control_label,
+  "COMUNITY-1",        "Community",            1, "Community 1",
+  "Community-2",       "Community",            2, "Community 2",
+  "DNA-CONTROL-1",     "DNA",                  1, "DNA 1",
+  "CONTROL-DNA-2",     "DNA",                  2, "DNA 2",
+  "Gut-1",             "Gut",                  1, "Gut 1",
+  "Gut-microbiome-2",  "Gut",                  2, "Gut 2"
+)
+```
+
+# Expected composition of Community and DNA controls
+```{r}
+expected_standard <- tribble(
+  ~species,                         ~expected_percent,
+  "Pseudomonas aeruginosa",         12,
+  "Escherichia coli",               12,
+  "Salmonella enterica",            12,
+  "Lactobacillus fermentum",        12,
+  "Enterococcus faecalis",          12,
+  "Staphylococcus aureus",          12,
+  "Listeria monocytogenes",         12,
+  "Bacillus subtilis",              12,
+  "Saccharomyces cerevisiae",        2,
+  "Cryptococcus neoformans",         2
+)
+```
+
+# Expected composition of Gut controls
+```{r}
+expected_gut <- tribble(
+  ~species,                           ~expected_percent,
+  "Faecalibacterium prausnitzii",       14,
+  "Veillonella rogosae",                14,
+  "Roseburia hominis",                  14,
+  "Bacteroides fragilis",               14,
+  "Escherichia coli",                   14,
+  "Prevotella corporis",                 6,
+  "Bifidobacterium adolescentis",        6,
+  "Fusobacterium nucleatum",             6,
+  "Lactobacillus fermentum",             6,
+  "Clostridioides difficile",            1.5,
+  "Akkermansia muciniphila",             1.5,
+  "Candida albicans",                    1.5,
+  "Saccharomyces cerevisiae",            1.4,
+  "Methanobrevibacter smithii",          0.1,
+  "Salmonella enterica",                 0.01,
+  "Enterococcus faecalis",               0.001,
+  "Clostridium perfringens",             0.0001
+)
+```
+
+
+```{r}
+expected_composition <- bind_rows(
+  expected_standard %>%
+    mutate(control_type = "Community"),
+
+  expected_standard %>%
+    mutate(control_type = "DNA"),
+
+  expected_gut %>%
+    mutate(control_type = "Gut")
+) %>%
+  select(control_type, species, expected_percent)
+
+# Minimum threshold for the main validation. Retain the full composition
+# in expected_composition, but do not quantitatively assess taxa
+# with expected abundances below 0.1%.
+min_expected_percent <- 0.1
+```
+
+
+# Taxonomic profiling of controls
+
+```{r}
+# Load all Bracken reports into a single table.
+files = dir("../TAX-TAXPROFILER/bracken/db2/",pattern = ".report_bracken_species.txt", full.names = T)
+tabla_raw <- import_kraken(files,threads = 20)
+
+     controls_list <- c("Community-2", "COMUNITY-1", "CONTROL-DNA-2", "DNA-CONTROL-1", "Gut-1", "Gut-microbiome-2")
+     
+tabla <- tabla_raw %>%
+  mutate(
+    Sample = gsub(
+      "_pe_run1_db2.bracken.kraken2.report_bracken_species.txt",
+      "",
+      Sample
+    )
+  ) %>%
+  filter(Sample %in% control_samples$Sample)
+
+
+DT::datatable(tabla[1:6])
+```
+
+# Extract species-level Kraken results only
+```{r}
+observed_species <- tabla %>%
+  filter(TaxRank == "S") %>%
+  transmute(
+    Sample,
+    species_original = str_squish(Name2),
+    species = str_squish(Name2),
+    observed_percent = as.numeric(Prop),
+    observed_reads = as.numeric(Reads)
+  ) %>%
+  mutate(
+    species = case_when(
+      species == "Limosilactobacillus fermentum" ~
+        "Lactobacillus fermentum",
+
+      TRUE ~ species
+    )
+  ) %>%
+  group_by(Sample, species) %>%
+  summarise(
+    observed_percent = sum(observed_percent),
+    observed_reads = sum(observed_reads),
+    .groups = "drop"
+  ) %>%
+  left_join(control_samples, by = "Sample")
+```
+
+Create all expected combinations for each sample.
+```{r}
+comparison_design <- control_samples %>%
+  left_join(
+    expected_composition,
+    by = "control_type"
+  ) %>%
+  filter(expected_percent >= min_expected_percent)
+```
+
+First check names that do not match.
+```{r}
+expected_not_matched <- comparison_design %>%
+  anti_join(
+    observed_species,
+    by = c(
+      "Sample",
+      "control_type",
+      "replicate",
+      "control_label",
+      "species"
+    )
+  ) %>%
+  arrange(control_type, replicate, desc(expected_percent))
+
+expected_not_matched %>% select(species) %>% unique()
+```
+Lactobacillus fermentum = "Limosilactobacillus fermentum" (RENAMED)
+Saccharomyces cerevisiae = FUNGUS
+Cryptococcus neoformans = FUNGUS
+Candida albicans = FUNGUS
+
+
+
+# Final expected-versus-observed table
+
+```{r}
+comparison <- comparison_design %>%
+  left_join(
+    observed_species %>%
+      select(
+        Sample,
+        species,
+        observed_percent,
+        observed_reads
+      ),
+    by = c("Sample", "species")
+  ) %>%
+  mutate(
+    observed_percent = replace_na(observed_percent, 0),
+    observed_reads = replace_na(observed_reads, 0),
+
+    detected = observed_reads > 0,
+
+    difference_pp =
+      observed_percent - expected_percent,
+
+    absolute_error_pp =
+      abs(observed_percent - expected_percent),
+
+    recovery_ratio =
+      observed_percent / expected_percent,
+
+    log2_recovery_ratio = if_else(
+      observed_percent > 0,
+      log2(observed_percent / expected_percent),
+      NA_real_
+    ),
+
+    expected_abundance_group = case_when(
+      expected_percent >= 0.1  ~ "Quantifiable",
+      expected_percent >= 0.01 ~ "Low abundance",
+      TRUE                     ~ "Trace abundance"
+    )
+  ) %>%
+  arrange(
+    control_type,
+    replicate,
+    desc(expected_percent),
+    species
+  )
+
+DT::datatable(
+  comparison %>%
+    select(
+      control_label,
+      species,
+      expected_percent,
+      observed_percent,
+      observed_reads,
+      detected,
+      difference_pp,
+      recovery_ratio,
+      expected_abundance_group
+    )
+)
+```
+```{r}
+not_detected <- comparison %>%
+  filter(!detected) %>%
+  select(
+    control_label,
+    species,
+    expected_percent,
+    expected_abundance_group
+  )
+
+not_detected
+```
+# Number of replicates recovering each microorganism
+```{r}
+replicate_recovery <- comparison %>%
+  group_by(
+    control_type,
+    species,
+    expected_percent
+  ) %>%
+  summarise(
+    replicates_detected = sum(detected),
+    total_replicates = n(),
+    mean_observed_percent = mean(observed_percent),
+    min_observed_percent = min(observed_percent),
+    max_observed_percent = max(observed_percent),
+    .groups = "drop"
+  )
+
+replicate_recovery
+```
+
+```{r}
+qc_summary <- comparison %>%
+  group_by(
+    Sample,
+    control_type,
+    replicate,
+    control_label
+  ) %>%
+  summarise(
+    expected_taxa = n(),
+
+    detected_taxa = sum(detected),
+
+    detection_rate_percent =
+      100 * sum(detected) / n(),
+
+    quantifiable_taxa =
+      sum(expected_percent >= 0.1),
+
+    detected_quantifiable_taxa =
+      sum(detected & expected_percent >= 0.1),
+
+    detection_rate_quantifiable_percent =
+      100 *
+      sum(detected & expected_percent >= 0.1) /
+      sum(expected_percent >= 0.1),
+
+    observed_abundance_expected_taxa =
+      sum(observed_percent),
+
+    mean_absolute_error_pp =
+      mean(
+        absolute_error_pp[
+          expected_percent >= 0.1
+        ]
+      ),
+
+    root_mean_squared_error_pp =
+      sqrt(
+        mean(
+          difference_pp[
+            expected_percent >= 0.1
+          ]^2
+        )
+      ),
+
+    .groups = "drop"
+  )
+
+qc_summary
+```
+
+```{r}
+unexpected_species <- observed_species %>%
+  anti_join(
+    expected_composition,
+    by = c("control_type", "species")
+  ) %>%
+  filter(observed_percent >= 0.01) %>%
+  arrange(
+    control_type,
+    replicate,
+    desc(observed_percent)
+  )
+
+unexpected_species %>%
+  select(
+    control_label,
+    species,
+    observed_percent,
+    observed_reads
+  )
+```
+```{r, warning = FALSE, message = FALSE, echo = FALSE, fig.width=6, fig.height=3}
+library(scales)
+
+comparison_plot <- comparison %>%
+  mutate(
+    species = forcats::fct_reorder(
+      species,
+      expected_percent
+    )
+  )
+
+p_controls <- ggplot(
+  comparison_plot,
+  aes(y = species)
+) +
+  geom_segment(
+    aes(
+      x = expected_percent,
+      xend = observed_percent,
+      yend = species
+    ),
+    linewidth = 0.5,
+    colour = "grey70"
+  ) +
+  geom_point(
+    aes(
+      x = expected_percent,
+      shape = "Expected"
+    ),
+    size = 2.5
+  ) +
+  geom_point(
+    aes(
+      x = observed_percent,
+      shape = "Observed"
+    ),
+    size = 2.5
+  ) +
+  facet_wrap(
+    ~control_label,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  scale_x_continuous(
+    trans = scales::pseudo_log_trans(
+      sigma = 0.0001,
+      base = 10
+    ),
+    breaks = c(
+      0,
+      0.0001,
+      0.001,
+      0.01,
+      0.1,
+      1,
+      10,
+      100
+    ),
+    labels = scales::label_number()
+  ) +
+  scale_shape_manual(
+    name = NULL,
+    values = c(
+      "Expected" = 1,
+      "Observed" = 16
+    )
+  ) +
+  labs(
+    x = "Relative abundance (%)",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "top",
+    strip.background = element_rect(
+      fill = "grey95"
+    ),
+    axis.text.y = element_text(
+      face = "italic"
+    )
+  )
+
+p_controls
+```
+
+# Heatmap of expected versus observed abundance
+
+The heatmap uses a linear scale and includes only microorganisms with an
+expected abundance of at least 0.1%. Each panel corresponds to a control sample
+and contains one column for the expected abundance and another for the
+abundance estimated by Bracken.
+
+```{r controls-expected-observed-heatmap, warning=FALSE, message=FALSE, echo=FALSE, fig.width=11, fig.height=8}
+controls_heatmap_data <- comparison %>%
+  select(
+    control_type,
+    replicate,
+    control_label,
+    species,
+    expected_percent,
+    observed_percent
+  ) %>%
+  pivot_longer(
+    cols = c(expected_percent, observed_percent),
+    names_to = "abundance_type",
+    values_to = "relative_abundance"
+  ) %>%
+  mutate(
+    abundance_type = recode(
+      abundance_type,
+      expected_percent = "Expected",
+      observed_percent = "Observed"
+    ),
+    abundance_type = factor(
+      abundance_type,
+      levels = c("Expected", "Observed")
+    ),
+    control_label = factor(
+      control_label,
+      levels = c(
+        "Community 1",
+        "Community 2",
+        "DNA 1",
+        "DNA 2",
+        "Gut 1",
+        "Gut 2"
+      )
+    ),
+    abundance_label = scales::number(
+      relative_abundance,
+      accuracy = 0.01,
+      trim = TRUE
+    ),
+    label_colour = if_else(relative_abundance >= 7, "white", "black")
+  )
+
+controls_heatmap <- ggplot(
+  controls_heatmap_data,
+  aes(x = abundance_type, y = species, fill = relative_abundance)
+) +
+  geom_tile(colour = "white", linewidth = 0.7) +
+  geom_text(
+    aes(label = abundance_label, colour = label_colour),
+    size = 3.4,
+    fontface = "bold"
+  ) +
+  facet_wrap(
+    ~control_label,
+    scales = "free_y",
+    ncol = 3
+  ) +
+  scale_fill_gradient(
+    low = "white",
+    high = "#0072B2",
+    limits = c(0, max(controls_heatmap_data$relative_abundance, na.rm = TRUE)),
+    name = "Relative abundance (%)"
+  ) +
+  scale_colour_identity() +
+  labs(
+    title = "Expected and observed taxonomic composition of mock controls",
+    subtitle = "Taxa with expected relative abundance ≥ 0.1%",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5),
+    strip.background = element_rect(fill = "grey95"),
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "italic"),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  )
+
+controls_heatmap
+
+ggsave(
+  "controls_expected_observed_heatmap.png",
+  controls_heatmap,
+  width = 11,
+  height = 8,
+  dpi = 300
+)
+```
+
+```{r}
+supplementary_mock_table <- comparison %>%
+  mutate(
+    detection_status = case_when(
+      !detected ~ "Not detected",
+
+      recovery_ratio >= 0.5 &
+        recovery_ratio <= 2 ~
+        "Detected, within two-fold of expected",
+
+      TRUE ~
+        "Detected, outside two-fold of expected"
+    )
+  ) %>%
+  select(
+    control_type,
+    replicate,
+    control_label,
+    species,
+    expected_percent,
+    observed_percent,
+    observed_reads,
+    detected,
+    difference_pp,
+    recovery_ratio,
+    expected_abundance_group,
+    detection_status
+  )
+
+supplementary_mock_table
+
+write_csv(
+  supplementary_mock_table,
+  "Supplementary_mock_controls.csv"
+)
+```
+
+```{r}
+controls_table_long <- comparison %>%
+  transmute(
+    Control = control_type,
+    Replicate = replicate,
+    Sample = control_label,
+    Species = species,
+    Expected_percent = expected_percent,
+    WGS_percent = observed_percent,
+    Reads = observed_reads,
+    Detected = if_else(detected, "Yes", "No"),
+    Difference_pp = observed_percent - expected_percent,
+    Recovery_percent = if_else(
+      expected_percent > 0,
+      100 * observed_percent / expected_percent,
+      NA_real_
+    )
+  ) %>%
+  mutate(
+    Sample = factor(
+      Sample,
+      levels = c(
+        "Community 1",
+        "Community 2",
+        "DNA 1",
+        "DNA 2",
+        "Gut 1",
+        "Gut 2"
+      )
+    )
+  ) %>%
+  arrange(
+    Sample,
+    desc(Expected_percent),
+    Species
+  )
+
+write_csv(
+  controls_table_long,
+  "controls_table_long.csv"
+)
+WriteXLS(
+  controls_table_long,
+  "controls_table_long.xlsx",
+   row.names = FALSE
+)
+```
+
+
+```{r}
+controls_table_wide <- controls_table_long %>%
+  select(
+    Sample,
+    Species,
+    Expected_percent,
+    WGS_percent
+  ) %>%
+  pivot_wider(
+    names_from = Sample,
+    values_from = c(
+      Expected_percent,
+      WGS_percent
+    ),
+    names_glue = "{Sample}_{.value}"
+  ) %>%
+  select(
+    Species,
+
+    `Community 1_Expected_percent`,
+    `Community 1_WGS_percent`,
+
+    `Community 2_Expected_percent`,
+    `Community 2_WGS_percent`,
+
+    `DNA 1_Expected_percent`,
+    `DNA 1_WGS_percent`,
+
+    `DNA 2_Expected_percent`,
+    `DNA 2_WGS_percent`,
+
+    `Gut 1_Expected_percent`,
+    `Gut 1_WGS_percent`,
+
+    `Gut 2_Expected_percent`,
+    `Gut 2_WGS_percent`
+  )
+
+write_csv(
+  controls_table_wide,
+  "controls_table_wide.csv"
+)
+WriteXLS(
+  controls_table_wide,
+  "controls_table_wide.xlsx",
+   row.names = FALSE
+)
+```
