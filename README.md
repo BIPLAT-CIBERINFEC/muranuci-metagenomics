@@ -16,7 +16,11 @@ The analyses use Kraken2/Bracken taxonomic profiles, sequencing quality-control 
 | `ARGs/R/MURANUCI_ARG_analysis.Rmd` | ARG detections, cross-method comparisons, culture concordance and contig taxonomy |
 | `ARGs/supplementary/paper_tables/generate_tables.py` | Supplementary tables from saved results and explicit curated-data CSV files |
 
-See the [ARG analysis documentation](ARGs/README.md) for its inputs, execution instructions and output tables.
+Inputs, execution instructions and generated outputs are documented for each analysis:
+
+- [Taxonomy and sequencing depth](TAX-TAXPROFILER/README.md)
+- [Mock-community controls](CONTROLS/README.md)
+- [ARG analysis](ARGs/README.md)
 
 ## Manuscript figures
 
