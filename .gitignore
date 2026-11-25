@@ -1,5 +1,5 @@
 # Default: keep data, reports and generated outputs local.
-# Only source code and repository documentation are eligible for review.
+# Source code, documentation and explicitly listed reproducibility files are eligible for review.
 *
 !*/
 !.gitignore
@@ -14,6 +14,20 @@
 !LICENSE
 !LICENSE.*
 !CITATION.cff
+!/renv.lock
+!/.Rprofile
+!/.renvignore
+!/MURANUCI_results.Rproj
+!/renv/settings.json
+
+# Installed packages and local renv state are not distributed.
+/renv/library/
+/renv/sandbox/
+/renv/staging/
+/renv/local/
+/renv/cache/
+/renv/cellar/
+/renv/lock/
 
 # Local R sessions, editor state and operating-system files.
 .RData

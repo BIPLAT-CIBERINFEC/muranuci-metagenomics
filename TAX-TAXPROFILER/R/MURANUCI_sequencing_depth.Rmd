@@ -12,6 +12,7 @@ pares de reads porque la secuenciación es paired-end.
 
 ```{r setup, message=FALSE, warning=FALSE}
 library(dplyr)
+library(readr)
 library(tidyr)
 library(stringr)
 library(purrr)

@@ -41,7 +41,17 @@ These scripts do not execute ARIBA, nf-core pipelines or new BLAST searches. The
 
 The R analyses use `tidyverse`. Additional packages loaded or called across the taxonomy, controls and sequencing-depth scripts include `ggsci`, `scales`, `cowplot`, `RColorBrewer`, `viridis`, `ggrepel`, `rvest`, `DT`, `doParallel` and `WriteXLS`. Rendering R Markdown requires `rmarkdown`, `knitr` and Pandoc. The Python generator uses the standard library.
 
-A package-version lockfile is not currently included.
+The project uses an isolated `renv` library. `renv.lock` records R 4.0.3 and the package versions in the project environment, including `ragg` 1.2.5, `readr` 2.1.4 and `readxl` 1.4.2. The library is activated by `.Rprofile` when R starts in the repository root. Installed packages under `renv/library/` are excluded from version control.
+
+`renv` is configured to record all packages available in the isolated environment, including the recommended packages supplied with R. `.renvignore` excludes historical scripts, local notebook files and generated outputs from dependency discovery.
+
+With the recorded R version installed, open `MURANUCI_results.Rproj` in RStudio, or start R in the repository root. Allow the `renv` bootstrap to install the recorded version of `renv` if prompted, then run:
+
+```r
+renv::restore()
+```
+
+Restoration from downloads has not been tested in a clean environment. Compiling packages may require system libraries and a C/C++ toolchain. The lockfile does not install R itself, Pandoc or operating-system dependencies, and does not provide the required analysis inputs.
 
 ## Local execution layout
 
@@ -60,11 +70,11 @@ study_workspace/
 
 The GitHub repository name remains `muranuci-metagenomics`; `results` is the directory name expected by the current local paths. Required pipeline outputs must be available at the locations referenced in the scripts.
 
-From R, with the working directory set to `study_workspace`:
+From R, with the project environment active and the working directory set to the repository root (`results`):
 
 ```r
-rmarkdown::render("results/TAX-TAXPROFILER/R/MURANUCI_taxonomy.Rmd")
-rmarkdown::render("results/ARGs/R/MURANUCI_ARG_analysis.Rmd")
+rmarkdown::render("TAX-TAXPROFILER/R/MURANUCI_taxonomy.Rmd")
+rmarkdown::render("ARGs/R/MURANUCI_ARG_analysis.Rmd")
 ```
 
 Run taxonomy before the ARG analysis when the derived selected-taxa table is not available. When executing individual chunks interactively, use the corresponding Rmd directory as the working directory for relative paths.
